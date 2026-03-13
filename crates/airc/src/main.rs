@@ -172,8 +172,7 @@ async fn main() {
             last,
             json,
         } => {
-            let resp =
-                send_command(Command::Fetch(ipc::FetchRequest { channel, last })).await;
+            let resp = send_command(Command::Fetch(ipc::FetchRequest { channel, last })).await;
             if json {
                 println!("{}", serde_json::to_string_pretty(&resp).unwrap());
             } else {
@@ -182,8 +181,7 @@ async fn main() {
         }
 
         Commands::Status { json } => {
-            let resp =
-                send_command(Command::Status(ipc::StatusRequest {})).await;
+            let resp = send_command(Command::Status(ipc::StatusRequest {})).await;
             if json {
                 println!("{}", serde_json::to_string_pretty(&resp).unwrap());
             } else {
@@ -204,17 +202,22 @@ async fn main() {
             }
         },
 
-        Commands::Logs { last, channel, json } => {
+        Commands::Logs {
+            last,
+            channel,
+            json,
+        } => {
             let resp = send_command(Command::Logs(ipc::LogsRequest {
                 last: Some(last),
                 channel,
-            })).await;
+            }))
+            .await;
             if json {
                 println!("{}", serde_json::to_string_pretty(&resp).unwrap());
             } else {
                 print_response(&resp);
             }
-        },
+        }
 
         Commands::Mcp => {
             // The MCP server uses stdio for JSON-RPC, so tracing must go
@@ -231,7 +234,7 @@ async fn main() {
                 eprintln!("error: {e}");
                 std::process::exit(1);
             }
-        },
+        }
     }
 }
 
@@ -326,10 +329,7 @@ fn print_response(resp: &ipc::IpcResponse) {
 fn chrono_format(ts: u64) -> String {
     use std::time::{Duration, UNIX_EPOCH};
     let dt = UNIX_EPOCH + Duration::from_secs(ts);
-    let elapsed = dt
-        .elapsed()
-        .unwrap_or_default()
-        .as_secs();
+    let elapsed = dt.elapsed().unwrap_or_default().as_secs();
     if elapsed < 60 {
         format!("{elapsed}s ago")
     } else if elapsed < 3600 {

@@ -79,7 +79,7 @@ impl ChannelLogger {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use airc_shared::log::{sanitize_filename, CSV_HEADER};
+    use airc_shared::log::{CSV_HEADER, sanitize_filename};
     use std::fs;
 
     #[test]

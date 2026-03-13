@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, mpsc};
 use tracing::{info, warn};
 
 use airc_shared::IrcMessage;
@@ -258,7 +258,11 @@ async fn reconnect_bridge(
                     info!(reason = %reason, "connection lost, starting auto-reconnect");
                     *client.connected.write().await = false;
                     // Forward the Disconnected event to the caller.
-                    let _ = ext_tx.send(IrcEvent::Disconnected { reason: reason.clone() }).await;
+                    let _ = ext_tx
+                        .send(IrcEvent::Disconnected {
+                            reason: reason.clone(),
+                        })
+                        .await;
                     break;
                 }
                 Some(ev) => {
@@ -289,10 +293,12 @@ async fn reconnect_bridge(
 
         loop {
             attempt += 1;
-            info!(attempt, delay_secs = delay.as_secs(), "attempting reconnect");
-            let _ = ext_tx
-                .send(IrcEvent::Reconnecting { attempt })
-                .await;
+            info!(
+                attempt,
+                delay_secs = delay.as_secs(),
+                "attempting reconnect"
+            );
+            let _ = ext_tx.send(IrcEvent::Reconnecting { attempt }).await;
 
             tokio::time::sleep(delay).await;
 

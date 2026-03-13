@@ -17,7 +17,7 @@ use tracing::{error, info};
 
 use airc_client::{IrcClient, IrcEvent};
 use airc_shared::ipc::ipc_request::Command;
-use airc_shared::log::{log_event_now, EventType, FileLogger, LogEvent};
+use airc_shared::log::{EventType, FileLogger, LogEvent, log_event_now};
 
 use crate::ipc::{self, IpcRequest, IpcResponse};
 
@@ -55,7 +55,11 @@ fn push_log_ring(ring: &SharedLogRing, event: LogEvent) {
 }
 
 /// Read events from the ring buffer, optionally filtered by channel and limited.
-fn read_log_ring(ring: &SharedLogRing, last: Option<usize>, channel: Option<&str>) -> Vec<LogEvent> {
+fn read_log_ring(
+    ring: &SharedLogRing,
+    last: Option<usize>,
+    channel: Option<&str>,
+) -> Vec<LogEvent> {
     let Ok(buf) = ring.lock() else {
         return Vec::new();
     };
@@ -107,8 +111,13 @@ pub async fn start(
         cmd.stdin(process::Stdio::null())
             .stdout(process::Stdio::null())
             .stderr(process::Stdio::null());
-        let child = cmd.spawn().map_err(|e| format!("cannot spawn daemon: {e}"))?;
-        println!("daemon started (pid {}), connecting to {server} as {nick}", child.id());
+        let child = cmd
+            .spawn()
+            .map_err(|e| format!("cannot spawn daemon: {e}"))?;
+        println!(
+            "daemon started (pid {}), connecting to {server} as {nick}",
+            child.id()
+        );
         if !auto_join.is_empty() {
             println!("auto-joining: {}", auto_join.join(", "));
         }
@@ -236,28 +245,46 @@ pub async fn start(
 fn log_irc_event(logger: &SharedLogger, log_ring: &SharedLogRing, event: &IrcEvent) {
     // Build the LogEvent for the ring buffer.
     let log_event = match event {
-        IrcEvent::Message(msg) => {
-            Some(log_event_now(EventType::Message, &msg.target, &msg.from, &msg.text))
-        }
-        IrcEvent::Join { nick, channel } => {
-            Some(log_event_now(EventType::Join, channel, nick, ""))
-        }
-        IrcEvent::Part { nick, channel, reason } => {
-            Some(log_event_now(EventType::Part, channel, nick, reason.as_deref().unwrap_or("")))
-        }
-        IrcEvent::Quit { nick, reason } => {
-            Some(log_event_now(EventType::Quit, "_quit", nick, reason.as_deref().unwrap_or("")))
-        }
-        IrcEvent::Kick { channel, nick, by, reason } => {
+        IrcEvent::Message(msg) => Some(log_event_now(
+            EventType::Message,
+            &msg.target,
+            &msg.from,
+            &msg.text,
+        )),
+        IrcEvent::Join { nick, channel } => Some(log_event_now(EventType::Join, channel, nick, "")),
+        IrcEvent::Part {
+            nick,
+            channel,
+            reason,
+        } => Some(log_event_now(
+            EventType::Part,
+            channel,
+            nick,
+            reason.as_deref().unwrap_or(""),
+        )),
+        IrcEvent::Quit { nick, reason } => Some(log_event_now(
+            EventType::Quit,
+            "_quit",
+            nick,
+            reason.as_deref().unwrap_or(""),
+        )),
+        IrcEvent::Kick {
+            channel,
+            nick,
+            by,
+            reason,
+        } => {
             let content = match reason {
                 Some(r) => format!("by {by} ({r})"),
                 None => format!("by {by}"),
             };
             Some(log_event_now(EventType::Kick, channel, nick, &content))
         }
-        IrcEvent::TopicChange { channel, topic, set_by } => {
-            Some(log_event_now(EventType::Topic, channel, set_by, topic))
-        }
+        IrcEvent::TopicChange {
+            channel,
+            topic,
+            set_by,
+        } => Some(log_event_now(EventType::Topic, channel, set_by, topic)),
         IrcEvent::NickChange { old_nick, new_nick } => {
             Some(log_event_now(EventType::Nick, "_nick", old_nick, new_nick))
         }
@@ -325,12 +352,10 @@ async fn execute_request(
             Err(e) => ipc::response_err(&format!("join failed: {e}")),
         },
 
-        Command::Part(r) => {
-            match client.part(&r.channel, r.reason.as_deref()).await {
-                Ok(()) => ipc::response_ok(&format!("left {}", r.channel)),
-                Err(e) => ipc::response_err(&format!("part failed: {e}")),
-            }
-        }
+        Command::Part(r) => match client.part(&r.channel, r.reason.as_deref()).await {
+            Ok(()) => ipc::response_ok(&format!("left {}", r.channel)),
+            Err(e) => ipc::response_err(&format!("part failed: {e}")),
+        },
 
         Command::Say(r) => match client.say(&r.target, &r.message).await {
             Ok(()) => ipc::response_ok(&format!("sent to {}", r.target)),
@@ -409,6 +434,6 @@ async fn execute_request(
             let channel = r.channel.as_deref();
             let events = read_log_ring(log_ring, last, channel);
             ipc::response_logs(events)
-        },
+        }
     }
 }

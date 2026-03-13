@@ -176,11 +176,16 @@ async fn handle_part(state: &SharedState, client_id: ClientId, msg: &IrcMessage)
                 for member in &remaining {
                     member.send_message(&part_msg);
                 }
-                state.logger().log_part(channel_name, &client.info.nick, reason.unwrap_or(""));
+                state
+                    .logger()
+                    .log_part(channel_name, &client.info.nick, reason.unwrap_or(""));
                 debug!(client_id = %client_id, channel = %channel_name, "parted channel");
             }
             None => {
-                client.send_numeric(ERR_NOTONCHANNEL, &[channel_name, "You're not on that channel"]);
+                client.send_numeric(
+                    ERR_NOTONCHANNEL,
+                    &[channel_name, "You're not on that channel"],
+                );
             }
         }
     }
@@ -198,12 +203,7 @@ async fn handle_notice(state: &SharedState, client_id: ClientId, msg: &IrcMessag
     route_message(state, client_id, msg, Command::Notice).await;
 }
 
-async fn route_message(
-    state: &SharedState,
-    client_id: ClientId,
-    msg: &IrcMessage,
-    cmd: Command,
-) {
+async fn route_message(state: &SharedState, client_id: ClientId, msg: &IrcMessage, cmd: Command) {
     let Some(client) = state.get_client(client_id).await else {
         return;
     };
@@ -220,7 +220,12 @@ async fn route_message(
     let text = &msg.params[1];
 
     // Check if the target is a service bot (NickServ, ChanServ, etc.).
-    if cmd == Command::Privmsg && state.services().try_route(state, &client, target, text).await {
+    if cmd == Command::Privmsg
+        && state
+            .services()
+            .try_route(state, &client, target, text)
+            .await
+    {
         return;
     }
 
@@ -299,7 +304,10 @@ async fn handle_quit(state: &SharedState, client_id: ClientId, msg: &IrcMessage)
         let error_msg = IrcMessage {
             prefix: None,
             command: Command::Unknown("ERROR".to_string()),
-            params: vec![format!("Closing Link: {} (Quit: {})", client.info.hostname, reason)],
+            params: vec![format!(
+                "Closing Link: {} (Quit: {})",
+                client.info.hostname, reason
+            )],
         };
         client.send_message(&error_msg);
     }
@@ -374,8 +382,14 @@ async fn handle_topic(state: &SharedState, client_id: ClientId, msg: &IrcMessage
                 .unwrap_or_default()
                 .as_secs();
 
-            if let Some(members) =
-                state.set_channel_topic(channel_name, new_topic.clone(), client.info.nick.clone(), now).await
+            if let Some(members) = state
+                .set_channel_topic(
+                    channel_name,
+                    new_topic.clone(),
+                    client.info.nick.clone(),
+                    now,
+                )
+                .await
             {
                 let topic_msg = IrcMessage {
                     prefix: Some(client.prefix()),
@@ -385,7 +399,9 @@ async fn handle_topic(state: &SharedState, client_id: ClientId, msg: &IrcMessage
                 for member in &members {
                     member.send_message(&topic_msg);
                 }
-                state.logger().log_topic(channel_name, &client.info.nick, &new_topic);
+                state
+                    .logger()
+                    .log_topic(channel_name, &client.info.nick, &new_topic);
             }
         }
     }
@@ -631,7 +647,12 @@ async fn handle_whois(state: &SharedState, client_id: ClientId, msg: &IrcMessage
                 client.send_numeric(RPL_WHOISCHANNELS, &[&target.info.nick, &chan_list]);
             }
             // Reputation (via NickServ identity lookup).
-            if let Some(identity) = state.services().nickserv.get_identity(&target.info.nick).await {
+            if let Some(identity) = state
+                .services()
+                .nickserv
+                .get_identity(&target.info.nick)
+                .await
+            {
                 let rep_line = format!("reputation: {}", identity.reputation);
                 client.send_numeric(RPL_WHOISSPECIAL, &[&target.info.nick, &rep_line]);
             }
@@ -729,7 +750,11 @@ async fn handle_kick(state: &SharedState, client_id: ClientId, msg: &IrcMessage)
     }
 
     state.kick_from_channel(channel_name, target.id).await;
-    state.logger().log_kick(channel_name, &target.info.nick, &format!("by {} ({})", client.info.nick, reason));
+    state.logger().log_kick(
+        channel_name,
+        &target.info.nick,
+        &format!("by {} ({})", client.info.nick, reason),
+    );
     debug!(client_id = %client_id, target = %target_nick, channel = %channel_name, "kicked");
 }
 
@@ -747,7 +772,10 @@ async fn handle_motd(state: &SharedState, client_id: ClientId) {
 /// Send the MOTD to a client. Called on registration and on `MOTD` command.
 pub fn send_motd(state: &SharedState, client: &crate::client::ClientHandle) {
     let config = state.config();
-    client.send_numeric(RPL_MOTDSTART, &[&format!("- {} Message of the day -", config.server_name)]);
+    client.send_numeric(
+        RPL_MOTDSTART,
+        &[&format!("- {} Message of the day -", config.server_name)],
+    );
     for line in &config.motd {
         client.send_numeric(RPL_MOTD, &[&format!("- {line}")]);
     }

@@ -16,9 +16,9 @@ use tracing::{debug, info, warn};
 
 use airc_shared::IrcMessage;
 
+use super::ServiceBot;
 use crate::client::ClientHandle;
 use crate::state::SharedState;
-use super::ServiceBot;
 
 const CHANSERV: &str = "ChanServ";
 const PERSISTENCE_FILE: &str = "chanserv.json";
@@ -155,7 +155,10 @@ impl ServiceBot for ChanServ {
             }
             "HELP" => self.cmd_help(sender),
             _ => {
-                reply(sender, &format!("Unknown command: {command}. Use HELP for a list of commands."));
+                reply(
+                    sender,
+                    &format!("Unknown command: {command}. Use HELP for a list of commands."),
+                );
             }
         }
 
@@ -197,7 +200,10 @@ impl ChanServ {
         drop(channels);
         self.persist().await;
 
-        reply(sender, &format!("Channel {channel} registered. You are the founder."));
+        reply(
+            sender,
+            &format!("Channel {channel} registered. You are the founder."),
+        );
         info!(channel = %channel, founder = %sender.info.nick, "ChanServ: channel registered");
     }
 
@@ -217,7 +223,10 @@ impl ChanServ {
             Some(reg) => {
                 reply(sender, &format!("Information for \x02{}\x02:", reg.name));
                 reply(sender, &format!("  Founder:         {}", reg.founder));
-                reply(sender, &format!("  Min reputation:  {}", reg.min_reputation));
+                reply(
+                    sender,
+                    &format!("  Min reputation:  {}", reg.min_reputation),
+                );
                 reply(sender, &format!("  Bans:            {}", reg.bans.len()));
                 if let Some(ref desc) = reg.description {
                     reply(sender, &format!("  Description:     {desc}"));
@@ -228,7 +237,13 @@ impl ChanServ {
 
     // -- SET <channel> <key> <value> ----------------------------------------
 
-    async fn cmd_set(&self, sender: &ClientHandle, channel: Option<&str>, key: Option<&str>, value: Option<&str>) {
+    async fn cmd_set(
+        &self,
+        sender: &ClientHandle,
+        channel: Option<&str>,
+        key: Option<&str>,
+        value: Option<&str>,
+    ) {
         let Some(channel) = channel else {
             reply(sender, "Usage: SET <#channel> <key> <value>");
             return;
@@ -261,7 +276,10 @@ impl ChanServ {
                 reg.min_reputation = val;
                 drop(channels);
                 self.persist().await;
-                reply(sender, &format!("Minimum reputation for {channel} set to {val}."));
+                reply(
+                    sender,
+                    &format!("Minimum reputation for {channel} set to {val}."),
+                );
             }
             "DESCRIPTION" | "DESC" => {
                 reg.description = value.map(|s| s.to_string());
@@ -270,14 +288,23 @@ impl ChanServ {
                 reply(sender, "Channel description updated.");
             }
             _ => {
-                reply(sender, "Unknown setting. Available: MIN-REPUTATION, DESCRIPTION");
+                reply(
+                    sender,
+                    "Unknown setting. Available: MIN-REPUTATION, DESCRIPTION",
+                );
             }
         }
     }
 
     // -- BAN/UNBAN <channel> <nick-pattern> ---------------------------------
 
-    async fn cmd_ban(&self, sender: &ClientHandle, channel: Option<&str>, pattern: Option<&str>, add: bool) {
+    async fn cmd_ban(
+        &self,
+        sender: &ClientHandle,
+        channel: Option<&str>,
+        pattern: Option<&str>,
+        add: bool,
+    ) {
         let Some(channel) = channel else {
             let cmd = if add { "BAN" } else { "UNBAN" };
             reply(sender, &format!("Usage: {cmd} <#channel> <nick-pattern>"));
@@ -314,7 +341,10 @@ impl ChanServ {
             reg.bans.retain(|b| *b != pattern_lower);
             drop(channels);
             self.persist().await;
-            reply(sender, &format!("Unbanned \x02{pattern}\x02 from {channel}."));
+            reply(
+                sender,
+                &format!("Unbanned \x02{pattern}\x02 from {channel}."),
+            );
         }
     }
 
@@ -393,7 +423,9 @@ fn load_channels() -> Result<HashMap<String, RegisteredChannel>, Box<dyn std::er
     Ok(map)
 }
 
-fn save_channels(channels: &HashMap<String, RegisteredChannel>) -> Result<(), Box<dyn std::error::Error>> {
+fn save_channels(
+    channels: &HashMap<String, RegisteredChannel>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let data = serde_json::to_string_pretty(channels)?;
     std::fs::write(PERSISTENCE_FILE, data)?;
     debug!(count = channels.len(), "ChanServ: persisted channels");

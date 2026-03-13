@@ -213,7 +213,9 @@ fn cmd_start(
 
             // Verify the HTTP API is reachable.
             if !wait_for_http(http_port, 10) {
-                eprintln!("\nwarning: server is running but HTTP API is not responding on port {http_port}");
+                eprintln!(
+                    "\nwarning: server is running but HTTP API is not responding on port {http_port}"
+                );
                 eprintln!("recent log output:");
                 print_log_tail(&log_file_path, 20);
                 // Kill the half-working server — no point keeping it without the API.

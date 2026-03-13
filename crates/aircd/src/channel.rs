@@ -42,11 +42,7 @@ impl ChannelModes {
         if self.limit.is_some() {
             s.push('l');
         }
-        if s.len() == 1 {
-            "+".to_string()
-        } else {
-            s
-        }
+        if s.len() == 1 { "+".to_string() } else { s }
     }
 }
 

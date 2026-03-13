@@ -41,9 +41,7 @@ pub fn socket_path() -> PathBuf {
 /// The listener runs in a background task. When a shutdown request is
 /// received, the handler sends the response to the client, then forwards
 /// the signal to the main server loop via the channel.
-pub fn start_listener(
-    state: SharedState,
-) -> Result<(mpsc::Receiver<IpcSignal>, PathBuf), String> {
+pub fn start_listener(state: SharedState) -> Result<(mpsc::Receiver<IpcSignal>, PathBuf), String> {
     let sock_path = socket_path();
 
     // Remove stale socket if it exists.
@@ -154,10 +152,7 @@ async fn write_frame(stream: &mut UnixStream, msg: &impl Message) -> Result<(), 
         .write_all(&buf)
         .await
         .map_err(|e| format!("write payload: {e}"))?;
-    stream
-        .flush()
-        .await
-        .map_err(|e| format!("flush: {e}"))?;
+    stream.flush().await.map_err(|e| format!("flush: {e}"))?;
     Ok(())
 }
 

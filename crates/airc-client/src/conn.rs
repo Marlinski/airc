@@ -9,9 +9,9 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use airc_shared::{Command, IrcMessage, Prefix};
 use airc_shared::reply::*;
 use airc_shared::validate::is_channel_name;
+use airc_shared::{Command, IrcMessage, Prefix};
 
 use crate::config::ClientConfig;
 use crate::error::ClientError;
@@ -53,12 +53,7 @@ pub async fn connect(
     // Spawn reader task.
     let reader_state = state.clone();
     let reader_line_tx = writer_tx.clone();
-    tokio::spawn(read_loop(
-        reader,
-        reader_line_tx,
-        event_tx,
-        reader_state,
-    ));
+    tokio::spawn(read_loop(reader, reader_line_tx, event_tx, reader_state));
 
     // Send registration sequence.
     if let Some(ref pass) = config.password {
@@ -68,19 +63,14 @@ pub async fn connect(
         .send(IrcMessage::nick(&config.nick).serialize())
         .await;
     let _ = line_tx
-        .send(
-            IrcMessage::user(&config.username, &config.realname).serialize(),
-        )
+        .send(IrcMessage::user(&config.username, &config.realname).serialize())
         .await;
 
     Ok((line_tx, event_rx, state))
 }
 
 /// Writer task: drains the line channel and writes to the TCP socket.
-async fn write_loop(
-    mut writer: tokio::net::tcp::OwnedWriteHalf,
-    mut rx: mpsc::Receiver<String>,
-) {
+async fn write_loop(mut writer: tokio::net::tcp::OwnedWriteHalf, mut rx: mpsc::Receiver<String>) {
     while let Some(line) = rx.recv().await {
         debug!(line = %line, "-> sending");
         let data = format!("{line}\r\n");
@@ -182,9 +172,7 @@ async fn handle_message(
             let current = state.nick().await;
             let new_nick = format!("{current}_");
             state.set_nick(new_nick.clone()).await;
-            let _ = line_tx
-                .send(IrcMessage::nick(&new_nick).serialize())
-                .await;
+            let _ = line_tx.send(IrcMessage::nick(&new_nick).serialize()).await;
             warn!(nick = %new_nick, "nick in use, trying alternative");
         }
 
@@ -296,10 +284,7 @@ async fn handle_message(
             }
             state.rename_member(&old_nick, &new_nick).await;
             let _ = event_tx
-                .send(IrcEvent::NickChange {
-                    old_nick,
-                    new_nick,
-                })
+                .send(IrcEvent::NickChange { old_nick, new_nick })
                 .await;
         }
 
@@ -374,13 +359,7 @@ async fn handle_message(
                 }
             }
 
-            let _ = event_tx
-                .send(IrcEvent::Notice {
-                    from,
-                    target,
-                    text,
-                })
-                .await;
+            let _ = event_tx.send(IrcEvent::Notice { from, target, text }).await;
         }
 
         // -- Everything else: emit as Raw ------------------------------------

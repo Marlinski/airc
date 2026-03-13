@@ -151,8 +151,9 @@ impl Connection {
                     if let Some(nick) = msg.params.first() {
                         pending_nick = Some(nick.clone());
                     } else {
-                        let reply = IrcMessage::numeric(ERR_NONICKNAMEGIVEN, "*", &["No nickname given"])
-                            .with_prefix(self.state.server_name());
+                        let reply =
+                            IrcMessage::numeric(ERR_NONICKNAMEGIVEN, "*", &["No nickname given"])
+                                .with_prefix(self.state.server_name());
                         send_raw(reply.serialize()).await;
                     }
                 }
@@ -162,9 +163,12 @@ impl Connection {
                         let realname = msg.params[3].clone();
                         pending_user = Some((username, realname));
                     } else {
-                        let reply =
-                            IrcMessage::numeric(ERR_NEEDMOREPARAMS, "*", &["USER", "Not enough parameters"])
-                                .with_prefix(self.state.server_name());
+                        let reply = IrcMessage::numeric(
+                            ERR_NEEDMOREPARAMS,
+                            "*",
+                            &["USER", "Not enough parameters"],
+                        )
+                        .with_prefix(self.state.server_name());
                         send_raw(reply.serialize()).await;
                     }
                 }
@@ -180,8 +184,9 @@ impl Connection {
                     return None;
                 }
                 _ => {
-                    let reply = IrcMessage::numeric(ERR_NOTREGISTERED, "*", &["You have not registered"])
-                        .with_prefix(self.state.server_name());
+                    let reply =
+                        IrcMessage::numeric(ERR_NOTREGISTERED, "*", &["You have not registered"])
+                            .with_prefix(self.state.server_name());
                     send_raw(reply.serialize()).await;
                 }
             }
@@ -190,7 +195,14 @@ impl Connection {
             if let (Some(nick), Some((username, realname))) = (&pending_nick, &pending_user) {
                 match self
                     .state
-                    .register_client(self.id, nick, username, realname, &self.hostname, tx.clone())
+                    .register_client(
+                        self.id,
+                        nick,
+                        username,
+                        realname,
+                        &self.hostname,
+                        tx.clone(),
+                    )
                     .await
                 {
                     Ok(handle) => {
@@ -254,10 +266,7 @@ fn send_welcome_burst(state: &SharedState, client: &ClientHandle) {
 // ---------------------------------------------------------------------------
 
 /// Drains the outgoing channel and writes lines to the socket.
-async fn write_loop(
-    mut writer: tokio::net::tcp::OwnedWriteHalf,
-    mut rx: mpsc::Receiver<String>,
-) {
+async fn write_loop(mut writer: tokio::net::tcp::OwnedWriteHalf, mut rx: mpsc::Receiver<String>) {
     while let Some(line) = rx.recv().await {
         let mut buf = line.into_bytes();
         buf.extend_from_slice(b"\r\n");

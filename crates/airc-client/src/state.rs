@@ -206,12 +206,7 @@ impl ClientState {
         let mut inner = self.inner.write().await;
         let key = channel.to_ascii_lowercase();
         if let Some(ch) = inner.channels.get_mut(&key) {
-            let unread: Vec<_> = ch
-                .messages
-                .iter()
-                .skip(ch.read_cursor)
-                .cloned()
-                .collect();
+            let unread: Vec<_> = ch.messages.iter().skip(ch.read_cursor).cloned().collect();
             ch.read_cursor = ch.messages.len();
             unread
         } else {
@@ -224,12 +219,7 @@ impl ClientState {
         let mut inner = self.inner.write().await;
         let mut all = Vec::new();
         for ch in inner.channels.values_mut() {
-            let unread: Vec<_> = ch
-                .messages
-                .iter()
-                .skip(ch.read_cursor)
-                .cloned()
-                .collect();
+            let unread: Vec<_> = ch.messages.iter().skip(ch.read_cursor).cloned().collect();
             ch.read_cursor = ch.messages.len();
             all.extend(unread);
         }

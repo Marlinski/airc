@@ -29,7 +29,7 @@ use tokio::net::UnixStream;
 use airc_shared::ipc::*;
 
 use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
-use rmcp::{tool, ServerHandler, ServiceExt};
+use rmcp::{ServerHandler, ServiceExt, tool};
 
 // ---------------------------------------------------------------------------
 // IPC helpers (duplicated from crates/airc/src/ipc.rs to avoid a lib dep)
@@ -85,16 +85,16 @@ async fn read_frame<R: AsyncReadExt + Unpin, M: Message + Default>(
 /// Send an IPC request to the daemon and return the response.
 async fn send_request(req: &IpcRequest) -> Result<IpcResponse, String> {
     let path = socket_path();
-    let mut stream = UnixStream::connect(&path).await.map_err(|e| {
-        match e.kind() {
+    let mut stream = UnixStream::connect(&path)
+        .await
+        .map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => {
                 "daemon is not running — use the `connect` tool first".to_string()
             }
             std::io::ErrorKind::ConnectionRefused => "connection refused".to_string(),
             std::io::ErrorKind::PermissionDenied => "permission denied".to_string(),
             _ => e.to_string(),
-        }
-    })?;
+        })?;
 
     write_frame(&mut stream, req).await?;
     stream
@@ -136,10 +136,16 @@ fn format_response(resp: IpcResponse) -> CallToolResult {
                             .unwrap_or(airc_shared::common::MessageKind::Normal);
                         match kind {
                             airc_shared::common::MessageKind::Action => {
-                                format!("[{}] {}: * {} {}", msg.timestamp, msg.target, msg.from, msg.text)
+                                format!(
+                                    "[{}] {}: * {} {}",
+                                    msg.timestamp, msg.target, msg.from, msg.text
+                                )
                             }
                             airc_shared::common::MessageKind::Normal => {
-                                format!("[{}] {}: <{}> {}", msg.timestamp, msg.target, msg.from, msg.text)
+                                format!(
+                                    "[{}] {}: <{}> {}",
+                                    msg.timestamp, msg.target, msg.from, msg.text
+                                )
                             }
                         }
                     })
@@ -306,9 +312,9 @@ impl AircMcpServer {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
-        let output = cmd.output().map_err(|e| {
-            rmcp::Error::internal_error(format!("failed to spawn airc: {e}"), None)
-        })?;
+        let output = cmd
+            .output()
+            .map_err(|e| rmcp::Error::internal_error(format!("failed to spawn airc: {e}"), None))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -356,10 +362,7 @@ impl AircMcpServer {
         name = "join",
         description = "Join an IRC channel. The daemon must be running (use `connect` first)."
     )]
-    async fn join(
-        &self,
-        #[tool(aggr)] params: JoinParams,
-    ) -> Result<CallToolResult, rmcp::Error> {
+    async fn join(&self, #[tool(aggr)] params: JoinParams) -> Result<CallToolResult, rmcp::Error> {
         match ipc_call(ipc_request::Command::Join(JoinRequest {
             channel: params.channel,
         }))
@@ -375,10 +378,7 @@ impl AircMcpServer {
         name = "part",
         description = "Leave (part) an IRC channel, optionally with a reason."
     )]
-    async fn part(
-        &self,
-        #[tool(aggr)] params: PartParams,
-    ) -> Result<CallToolResult, rmcp::Error> {
+    async fn part(&self, #[tool(aggr)] params: PartParams) -> Result<CallToolResult, rmcp::Error> {
         match ipc_call(ipc_request::Command::Part(PartRequest {
             channel: params.channel,
             reason: params.reason,
@@ -395,10 +395,7 @@ impl AircMcpServer {
         name = "say",
         description = "Send a message to an IRC channel or user (PRIVMSG)."
     )]
-    async fn say(
-        &self,
-        #[tool(aggr)] params: SayParams,
-    ) -> Result<CallToolResult, rmcp::Error> {
+    async fn say(&self, #[tool(aggr)] params: SayParams) -> Result<CallToolResult, rmcp::Error> {
         match ipc_call(ipc_request::Command::Say(SayRequest {
             target: params.target,
             message: params.message,
@@ -451,10 +448,7 @@ impl AircMcpServer {
         name = "logs",
         description = "Show recent IRC log events from the daemon's in-memory buffer. Returns the last N events, optionally filtered by channel."
     )]
-    async fn logs(
-        &self,
-        #[tool(aggr)] params: LogsParams,
-    ) -> Result<CallToolResult, rmcp::Error> {
+    async fn logs(&self, #[tool(aggr)] params: LogsParams) -> Result<CallToolResult, rmcp::Error> {
         match ipc_call(ipc_request::Command::Logs(LogsRequest {
             last: params.last,
             channel: params.channel,

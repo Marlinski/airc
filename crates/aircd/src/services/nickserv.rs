@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ed25519_dalek::{Signature, VerifyingKey, Verifier};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
@@ -18,9 +18,9 @@ use tracing::{debug, info, warn};
 
 use airc_shared::{Command, IrcMessage};
 
+use super::ServiceBot;
 use crate::client::ClientHandle;
 use crate::state::SharedState;
-use super::ServiceBot;
 
 const NICKSERV: &str = "NickServ";
 const PERSISTENCE_FILE: &str = "nickserv.json";
@@ -119,7 +119,10 @@ impl ServiceBot for NickServ {
             "REPUTATION" => self.cmd_reputation(sender, arg1).await,
             "HELP" => self.cmd_help(sender),
             _ => {
-                reply(sender, &format!("Unknown command: {command}. Use HELP for a list of commands."));
+                reply(
+                    sender,
+                    &format!("Unknown command: {command}. Use HELP for a list of commands."),
+                );
             }
         }
     }
@@ -128,7 +131,12 @@ impl ServiceBot for NickServ {
 impl NickServ {
     // -- REGISTER <password> ------------------------------------------------
 
-    async fn cmd_register(&self, _state: &SharedState, sender: &ClientHandle, password: Option<&str>) {
+    async fn cmd_register(
+        &self,
+        _state: &SharedState,
+        sender: &ClientHandle,
+        password: Option<&str>,
+    ) {
         let Some(password) = password else {
             reply(sender, "Usage: REGISTER <password>");
             return;
@@ -153,16 +161,28 @@ impl NickServ {
             capabilities: Vec::new(),
         };
 
-        self.inner.identities.write().await.insert(nick_lower, identity);
+        self.inner
+            .identities
+            .write()
+            .await
+            .insert(nick_lower, identity);
         self.persist().await;
 
-        reply(sender, "Nickname registered successfully. You are now identified.");
+        reply(
+            sender,
+            "Nickname registered successfully. You are now identified.",
+        );
         info!(nick = %sender.info.nick, method = "password", "NickServ: registered");
     }
 
     // -- IDENTIFY <password> ------------------------------------------------
 
-    async fn cmd_identify(&self, _state: &SharedState, sender: &ClientHandle, password: Option<&str>) {
+    async fn cmd_identify(
+        &self,
+        _state: &SharedState,
+        sender: &ClientHandle,
+        password: Option<&str>,
+    ) {
         let Some(password) = password else {
             reply(sender, "Usage: IDENTIFY <password>");
             return;
@@ -175,27 +195,30 @@ impl NickServ {
             None => {
                 reply(sender, "This nickname is not registered.");
             }
-            Some(identity) => {
-                match &identity.password_hash {
-                    Some(hash) if *hash == simple_hash(password) => {
-                        reply(sender, "You are now identified.");
-                        info!(nick = %sender.info.nick, "NickServ: identified via password");
-                    }
-                    Some(_) => {
-                        reply(sender, "Incorrect password.");
-                        warn!(nick = %sender.info.nick, "NickServ: failed password identify");
-                    }
-                    None => {
-                        reply(sender, "This nick uses keypair auth. Use CHALLENGE/VERIFY.");
-                    }
+            Some(identity) => match &identity.password_hash {
+                Some(hash) if *hash == simple_hash(password) => {
+                    reply(sender, "You are now identified.");
+                    info!(nick = %sender.info.nick, "NickServ: identified via password");
                 }
-            }
+                Some(_) => {
+                    reply(sender, "Incorrect password.");
+                    warn!(nick = %sender.info.nick, "NickServ: failed password identify");
+                }
+                None => {
+                    reply(sender, "This nick uses keypair auth. Use CHALLENGE/VERIFY.");
+                }
+            },
         }
     }
 
     // -- REGISTER-KEY <pubkey-hex> ------------------------------------------
 
-    async fn cmd_register_key(&self, _state: &SharedState, sender: &ClientHandle, pubkey_hex: Option<&str>) {
+    async fn cmd_register_key(
+        &self,
+        _state: &SharedState,
+        sender: &ClientHandle,
+        pubkey_hex: Option<&str>,
+    ) {
         let Some(pubkey_hex) = pubkey_hex else {
             reply(sender, "Usage: REGISTER-KEY <ed25519-public-key-hex>");
             return;
@@ -203,7 +226,10 @@ impl NickServ {
 
         // Validate the public key.
         if parse_pubkey(pubkey_hex).is_none() {
-            reply(sender, "Invalid Ed25519 public key (expected 64 hex chars).");
+            reply(
+                sender,
+                "Invalid Ed25519 public key (expected 64 hex chars).",
+            );
             return;
         }
 
@@ -226,10 +252,17 @@ impl NickServ {
             capabilities: Vec::new(),
         };
 
-        self.inner.identities.write().await.insert(nick_lower, identity);
+        self.inner
+            .identities
+            .write()
+            .await
+            .insert(nick_lower, identity);
         self.persist().await;
 
-        reply(sender, "Nickname registered with keypair. Use CHALLENGE/VERIFY to identify.");
+        reply(
+            sender,
+            "Nickname registered with keypair. Use CHALLENGE/VERIFY to identify.",
+        );
         info!(nick = %sender.info.nick, method = "keypair", "NickServ: registered");
     }
 
@@ -246,7 +279,10 @@ impl NickServ {
                     return;
                 }
                 Some(id) if id.pubkey_hex.is_none() => {
-                    reply(sender, "This nick uses password auth. Use IDENTIFY <password>.");
+                    reply(
+                        sender,
+                        "This nick uses password auth. Use IDENTIFY <password>.",
+                    );
                     return;
                 }
                 _ => {}
@@ -257,16 +293,17 @@ impl NickServ {
         rand::thread_rng().fill(&mut nonce);
         let nonce_hex = hex_encode(&nonce);
 
-        self.inner.challenges.write().await.insert(
-            nick_lower.clone(),
-            PendingChallenge {
-                nonce,
-                nick_lower,
-            },
-        );
+        self.inner
+            .challenges
+            .write()
+            .await
+            .insert(nick_lower.clone(), PendingChallenge { nonce, nick_lower });
 
         reply(sender, &format!("CHALLENGE {nonce_hex}"));
-        reply(sender, "Sign this nonce with your private key and reply: VERIFY <signature-hex>");
+        reply(
+            sender,
+            "Sign this nonce with your private key and reply: VERIFY <signature-hex>",
+        );
         debug!(nick = %sender.info.nick, "NickServ: issued challenge");
     }
 
@@ -310,7 +347,10 @@ impl NickServ {
         };
 
         if sig_bytes.len() != 64 {
-            reply(sender, "Invalid signature length (expected 128 hex chars / 64 bytes).");
+            reply(
+                sender,
+                "Invalid signature length (expected 128 hex chars / 64 bytes).",
+            );
             return;
         }
 
@@ -340,7 +380,10 @@ impl NickServ {
                 reply(sender, &format!("{target} is not registered."));
             }
             Some(identity) => {
-                reply(sender, &format!("Information for \x02{}\x02:", identity.nick));
+                reply(
+                    sender,
+                    &format!("Information for \x02{}\x02:", identity.nick),
+                );
                 let method = if identity.pubkey_hex.is_some() {
                     "keypair"
                 } else {
@@ -348,9 +391,15 @@ impl NickServ {
                 };
                 reply(sender, &format!("  Auth method: {method}"));
                 reply(sender, &format!("  Reputation:  {}", identity.reputation));
-                reply(sender, &format!("  Registered:  {}", identity.registered_at));
+                reply(
+                    sender,
+                    &format!("  Registered:  {}", identity.registered_at),
+                );
                 if !identity.capabilities.is_empty() {
-                    reply(sender, &format!("  Capabilities: {}", identity.capabilities.join(", ")));
+                    reply(
+                        sender,
+                        &format!("  Capabilities: {}", identity.capabilities.join(", ")),
+                    );
                 }
                 if let Some(ref pk) = identity.pubkey_hex {
                     reply(sender, &format!("  Public key:  {pk}"));
@@ -382,14 +431,25 @@ impl NickServ {
         }
 
         // Rate-limit: one vouch per (sender, target) every 5 minutes.
-        if let Err(remaining) = self.check_rate_limit(&sender.info.nick, "vouch", target).await {
-            reply(sender, &format!("Rate limited. Try again in {remaining} seconds."));
+        if let Err(remaining) = self
+            .check_rate_limit(&sender.info.nick, "vouch", target)
+            .await
+        {
+            reply(
+                sender,
+                &format!("Rate limited. Try again in {remaining} seconds."),
+            );
             return;
         }
 
         match self.modify_reputation(target, 1).await {
             Some(new_score) => {
-                reply(sender, &format!("You vouched for \x02{target}\x02. Their reputation is now {new_score}."));
+                reply(
+                    sender,
+                    &format!(
+                        "You vouched for \x02{target}\x02. Their reputation is now {new_score}."
+                    ),
+                );
                 info!(sender = %sender.info.nick, target = %target, "NickServ: vouch");
             }
             None => {
@@ -421,14 +481,23 @@ impl NickServ {
         }
 
         // Rate-limit: one report per (sender, target) every 5 minutes.
-        if let Err(remaining) = self.check_rate_limit(&sender.info.nick, "report", target).await {
-            reply(sender, &format!("Rate limited. Try again in {remaining} seconds."));
+        if let Err(remaining) = self
+            .check_rate_limit(&sender.info.nick, "report", target)
+            .await
+        {
+            reply(
+                sender,
+                &format!("Rate limited. Try again in {remaining} seconds."),
+            );
             return;
         }
 
         match self.modify_reputation(target, -1).await {
             Some(new_score) => {
-                reply(sender, &format!("You reported \x02{target}\x02. Their reputation is now {new_score}."));
+                reply(
+                    sender,
+                    &format!("You reported \x02{target}\x02. Their reputation is now {new_score}."),
+                );
                 info!(sender = %sender.info.nick, target = %target, "NickServ: report");
             }
             None => {
@@ -447,7 +516,13 @@ impl NickServ {
 
         match self.get_identity(nick).await {
             Some(identity) => {
-                reply(sender, &format!("Reputation for \x02{}\x02: {}", identity.nick, identity.reputation));
+                reply(
+                    sender,
+                    &format!(
+                        "Reputation for \x02{}\x02: {}",
+                        identity.nick, identity.reputation
+                    ),
+                );
             }
             None => {
                 reply(sender, &format!("{nick} is not registered."));
@@ -495,7 +570,10 @@ impl NickServ {
                 return;
             }
             None => {
-                reply(sender, "That nick uses keypair auth; GHOST requires a password.");
+                reply(
+                    sender,
+                    "That nick uses keypair auth; GHOST requires a password.",
+                );
                 return;
             }
         }

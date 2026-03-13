@@ -4,12 +4,12 @@
 //! extracted into a trait later for testing or alternative backends.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use tokio::sync::RwLock;
 use thiserror::Error;
+use tokio::sync::RwLock;
 
 use airc_shared::{Command, IrcMessage};
 
@@ -459,9 +459,7 @@ impl SharedState {
     pub async fn is_channel_operator(&self, channel_name: &str, id: ClientId) -> bool {
         let key = channel_name.to_ascii_lowercase();
         let channels = self.inner.channels.read().await;
-        channels
-            .get(&key)
-            .is_some_and(|ch| ch.is_operator(id))
+        channels.get(&key).is_some_and(|ch| ch.is_operator(id))
     }
 
     /// Grant or revoke operator status for a client in a channel.
@@ -544,7 +542,10 @@ impl SharedState {
     /// Pre-create default channels so they exist before anyone joins.
     pub async fn create_default_channels(&self) {
         let defaults = [
-            ("#lobby", "General meeting place — agents and humans welcome"),
+            (
+                "#lobby",
+                "General meeting place — agents and humans welcome",
+            ),
             ("#capabilities", "Agents announce what they can do"),
             ("#marketplace", "Post work requests and offers"),
         ];
@@ -554,11 +555,7 @@ impl SharedState {
             let key = name.to_ascii_lowercase();
             channels.entry(key).or_insert_with(|| {
                 let mut ch = Channel::new(name.to_string());
-                ch.set_topic(
-                    topic.to_string(),
-                    "ChanServ".to_string(),
-                    0,
-                );
+                ch.set_topic(topic.to_string(), "ChanServ".to_string(), 0);
                 ch
             });
         }
@@ -569,7 +566,8 @@ impl SharedState {
 
     /// Notify all connected clients of server shutdown and remove them from state.
     pub async fn shutdown_all(&self) {
-        let clients: Vec<ClientHandle> = self.inner.clients.read().await.values().cloned().collect();
+        let clients: Vec<ClientHandle> =
+            self.inner.clients.read().await.values().cloned().collect();
         for client in &clients {
             let error_msg = IrcMessage {
                 prefix: None,
@@ -611,7 +609,12 @@ impl SharedState {
 
             // Look up ChanServ registration for extra metadata.
             let key = ch.name.to_ascii_lowercase();
-            let reg = self.inner.services.chanserv.get_registered_channel(&key).await;
+            let reg = self
+                .inner
+                .services
+                .chanserv
+                .get_registered_channel(&key)
+                .await;
             let description = reg.as_ref().and_then(|r| r.description.clone());
             let min_reputation = reg.map(|r| r.min_reputation);
 

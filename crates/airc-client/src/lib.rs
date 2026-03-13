@@ -43,5 +43,5 @@ mod state;
 pub use client::IrcClient;
 pub use config::ClientConfig;
 pub use error::ClientError;
-pub use event::{IrcEvent, ChannelMessage, MessageKind, new_channel_message};
-pub use state::{ClientState, ChannelStatus};
+pub use event::{ChannelMessage, IrcEvent, MessageKind, new_channel_message};
+pub use state::{ChannelStatus, ClientState};
