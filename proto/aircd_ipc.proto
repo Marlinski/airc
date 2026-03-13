@@ -9,16 +9,16 @@
 
 syntax = "proto3";
 
-package airc.aird_ipc;
+package airc.aircd_ipc;
 
 // ---------------------------------------------------------------------------
 // Request: aircd CLI -> server process
 // ---------------------------------------------------------------------------
 
-message AirdRequest {
+message AircdRequest {
   oneof command {
     ShutdownRequest shutdown = 1;
-    PingRequest     ping     = 2;
+    StatsRequest    stats    = 2;
   }
 }
 
@@ -26,19 +26,19 @@ message ShutdownRequest {
   optional string reason = 1;   // Human-readable reason (shown in logs)
 }
 
-message PingRequest {}
+message StatsRequest {}
 
 // ---------------------------------------------------------------------------
 // Response: server process -> aircd CLI
 // ---------------------------------------------------------------------------
 
-message AirdResponse {
+message AircdResponse {
   bool            ok    = 1;
   optional string error = 2;
 
   oneof payload {
     ShutdownResponse shutdown = 3;
-    PingResponse     ping     = 4;
+    StatsResponse    stats    = 4;
   }
 }
 
@@ -46,7 +46,19 @@ message ShutdownResponse {
   string message = 1;   // e.g. "shutting down gracefully"
 }
 
-message PingResponse {
-  uint64 uptime_seconds = 1;
-  uint64 users_online   = 2;
+message StatsResponse {
+  string              server_name     = 1;
+  uint64              users_online    = 2;
+  uint64              channels_active = 3;
+  uint64              uptime_seconds  = 4;
+  repeated ChannelInfo channels       = 5;
+}
+
+message ChannelInfo {
+  string          name           = 1;
+  optional string topic          = 2;
+  uint64          member_count   = 3;
+  string          modes          = 4;
+  optional string description    = 5;
+  optional int64  min_reputation = 6;
 }

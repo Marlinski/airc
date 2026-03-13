@@ -1,19 +1,18 @@
-//! HTTP API server — serves live stats and the static documentation site.
+//! HTTP API server — REST API and Prometheus metrics.
 //!
 //! Endpoints:
 //! - `GET /api/stats`             — server statistics (users, channels, uptime)
 //! - `GET /api/channels`          — list of channels with details
 //! - `GET /api/reputation/:nick`  — reputation info for a registered nick
-//! - `GET /*`                     — static files from the `site/` directory
+//! - `GET /metrics`               — Prometheus exposition format
 
 use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::response::Json;
+use axum::response::{IntoResponse, Json};
 use axum::routing::get;
-use tower_http::services::ServeDir;
 use tracing::info;
 
 use crate::state::SharedState;
@@ -53,29 +52,61 @@ async fn get_reputation(
     }
 }
 
+/// Prometheus exposition format metrics.
+async fn get_metrics(State(state): State<Arc<SharedState>>) -> impl IntoResponse {
+    let stats = state.stats().await;
+
+    let mut buf = String::with_capacity(512);
+
+    buf.push_str("# HELP aircd_users_online Number of connected IRC clients.\n");
+    buf.push_str("# TYPE aircd_users_online gauge\n");
+    buf.push_str(&format!("aircd_users_online {}\n", stats.users_online));
+
+    buf.push_str("# HELP aircd_channels_active Number of active channels.\n");
+    buf.push_str("# TYPE aircd_channels_active gauge\n");
+    buf.push_str(&format!(
+        "aircd_channels_active {}\n",
+        stats.channels_active
+    ));
+
+    buf.push_str("# HELP aircd_uptime_seconds Server uptime in seconds.\n");
+    buf.push_str("# TYPE aircd_uptime_seconds counter\n");
+    buf.push_str(&format!("aircd_uptime_seconds {}\n", stats.uptime_seconds));
+
+    for ch in &stats.channels {
+        let name = &ch.name;
+        buf.push_str(&format!(
+            "aircd_channel_members{{channel=\"{name}\"}} {}\n",
+            ch.member_count
+        ));
+    }
+
+    (
+        StatusCode::OK,
+        [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
+        buf,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Router construction
 // ---------------------------------------------------------------------------
 
-/// Build the complete HTTP router with API routes and static file serving.
-pub fn router(state: SharedState, site_dir: &str) -> Router {
+/// Build the HTTP router with API routes and metrics.
+pub fn router(state: SharedState) -> Router {
     let shared = Arc::new(state);
 
-    let api = Router::new()
+    Router::new()
         .route("/api/stats", get(get_stats))
         .route("/api/channels", get(get_channels))
         .route("/api/reputation/{nick}", get(get_reputation))
-        .with_state(shared);
-
-    // Static file serving for the documentation site.
-    let static_files = ServeDir::new(site_dir);
-
-    api.fallback_service(static_files)
+        .route("/metrics", get(get_metrics))
+        .with_state(shared)
 }
 
 /// Start the HTTP server on the given address.
-pub async fn serve(addr: &str, state: SharedState, site_dir: &str) -> std::io::Result<()> {
-    let app = router(state, site_dir);
+pub async fn serve(addr: &str, state: SharedState) -> std::io::Result<()> {
+    let app = router(state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!(addr = %addr, "HTTP API server listening");
     axum::serve(listener, app).await?;

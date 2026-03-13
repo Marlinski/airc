@@ -1,8 +1,8 @@
-//! IPC socket listener for `aircd stop` graceful shutdown and health pings.
+//! IPC socket listener for `aircd stop` / `aircd status` commands.
 //!
 //! The server binds a Unix domain socket at `aircd.sock` (same directory as
 //! the PID file). The `aircd` CLI connects to this socket to send shutdown
-//! or ping requests using length-prefixed protobuf frames.
+//! or stats requests using length-prefixed protobuf frames.
 //!
 //! Wire format: `[4 bytes big-endian length][protobuf payload]` — same as
 //! the airc CLI<->daemon IPC.
@@ -16,8 +16,8 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use airc_shared::aird_ipc::aird_request::Command;
-use airc_shared::aird_ipc::*;
+use airc_shared::aircd_ipc::aircd_request::Command;
+use airc_shared::aircd_ipc::*;
 
 use crate::state::SharedState;
 
@@ -86,10 +86,10 @@ async fn handle_ipc_connection(
     state: &SharedState,
     shutdown_tx: &mpsc::Sender<IpcSignal>,
 ) -> Result<(), String> {
-    let req: AirdRequest = read_frame(&mut stream).await?;
+    let req: AircdRequest = read_frame(&mut stream).await?;
 
     let Some(command) = req.command else {
-        let resp = aird_response_err("empty request (no command)");
+        let resp = aircd_response_err("empty request (no command)");
         write_frame(&mut stream, &resp).await?;
         return Ok(());
     };
@@ -100,10 +100,10 @@ async fn handle_ipc_connection(
             info!(reason = %reason, "shutdown requested via IPC");
 
             // Send response before triggering shutdown.
-            let resp = AirdResponse {
+            let resp = AircdResponse {
                 ok: true,
                 error: None,
-                payload: Some(aird_response::Payload::Shutdown(ShutdownResponse {
+                payload: Some(aircd_response::Payload::Shutdown(ShutdownResponse {
                     message: "shutting down gracefully".to_string(),
                 })),
             };
@@ -119,18 +119,15 @@ async fn handle_ipc_connection(
             debug!("shutdown signal sent to main loop");
         }
 
-        Command::Ping(_) => {
-            let stats = state.api_stats().await;
-            let resp = AirdResponse {
+        Command::Stats(_) => {
+            let stats = state.stats().await;
+            let resp = AircdResponse {
                 ok: true,
                 error: None,
-                payload: Some(aird_response::Payload::Ping(PingResponse {
-                    uptime_seconds: stats.uptime_seconds,
-                    users_online: stats.users_online,
-                })),
+                payload: Some(aircd_response::Payload::Stats(stats)),
             };
             write_frame(&mut stream, &resp).await?;
-            debug!("ping response sent");
+            debug!("stats response sent");
         }
     }
 
@@ -177,8 +174,8 @@ async fn read_frame<M: Message + Default>(stream: &mut UnixStream) -> Result<M, 
     M::decode(&payload[..]).map_err(|e| format!("decode: {e}"))
 }
 
-fn aird_response_err(msg: &str) -> AirdResponse {
-    AirdResponse {
+fn aircd_response_err(msg: &str) -> AircdResponse {
+    AircdResponse {
         ok: false,
         error: Some(msg.to_string()),
         payload: None,

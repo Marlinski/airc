@@ -64,6 +64,10 @@ pub enum IrcEvent {
     Reconnecting { attempt: u32 },
     /// Successfully reconnected after a disconnection.
     Reconnected,
+    /// A single MOTD line from the server (RPL_MOTD 372).
+    Motd { line: String },
+    /// End of MOTD (RPL_ENDOFMOTD 376).
+    MotdEnd,
     /// An unhandled/raw IRC message.
     Raw { line: String },
 }

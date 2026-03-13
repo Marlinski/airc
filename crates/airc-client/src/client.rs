@@ -53,12 +53,14 @@ impl IrcClient {
     /// 1. Open a TCP connection
     /// 2. Send NICK/USER (and PASS if configured)
     /// 3. Wait for RPL_WELCOME (001) or timeout after 10 seconds
-    /// 4. Auto-join any channels from config
+    /// 4. Collect the server MOTD (if any)
+    /// 5. Auto-join any channels from config
     ///
-    /// Returns the connected client and an event receiver for real-time events.
+    /// Returns the connected client, the MOTD lines, and an event receiver for
+    /// real-time events.
     pub async fn connect(
         config: ClientConfig,
-    ) -> Result<(Self, mpsc::Receiver<IrcEvent>), ClientError> {
+    ) -> Result<(Self, Vec<String>, mpsc::Receiver<IrcEvent>), ClientError> {
         let (line_tx, mut event_rx, state) = conn::connect(&config).await?;
 
         // Wait for registration to complete (RPL_WELCOME).
@@ -93,6 +95,31 @@ impl IrcClient {
             Err(_) => return Err(ClientError::Timeout),
         }
 
+        // Collect MOTD lines. The server sends them right after RPL_WELCOME.
+        // We drain events until we see MotdEnd (376) or hit a short timeout
+        // (some servers may not send a MOTD at all).
+        let mut motd_lines = Vec::new();
+        let mut pending_events = Vec::new();
+        let motd_timeout = Duration::from_secs(3);
+        let _ = tokio::time::timeout(motd_timeout, async {
+            loop {
+                match event_rx.recv().await {
+                    Some(IrcEvent::Motd { line }) => {
+                        motd_lines.push(line);
+                    }
+                    Some(IrcEvent::MotdEnd) => {
+                        break;
+                    }
+                    Some(other) => {
+                        // Buffer non-MOTD events that arrive during this window.
+                        pending_events.push(other);
+                    }
+                    None => break,
+                }
+            }
+        })
+        .await;
+
         let client = IrcClient {
             line_tx: Arc::new(RwLock::new(line_tx)),
             state,
@@ -112,10 +139,16 @@ impl IrcClient {
         // receiver to an external one, intercepting Disconnected to trigger
         // reconnect.
         let (ext_tx, ext_rx) = mpsc::channel::<IrcEvent>(512);
+
+        // Re-emit any events that arrived during the MOTD collection window.
+        for ev in pending_events {
+            let _ = ext_tx.send(ev).await;
+        }
+
         let reconnect_client = client.clone();
         tokio::spawn(reconnect_bridge(reconnect_client, event_rx, ext_tx));
 
-        Ok((client, ext_rx))
+        Ok((client, motd_lines, ext_rx))
     }
 
     // -- Channel operations ---------------------------------------------------

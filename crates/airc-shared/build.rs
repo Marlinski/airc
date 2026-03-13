@@ -5,9 +5,9 @@ fn main() -> Result<()> {
 
     let protos = &[
         format!("{proto_dir}/common.proto"),
-        format!("{proto_dir}/aird_http_api.proto"),
+        format!("{proto_dir}/aircd_http_api.proto"),
         format!("{proto_dir}/airc_ipc.proto"),
-        format!("{proto_dir}/aird_ipc.proto"),
+        format!("{proto_dir}/aircd_ipc.proto"),
     ];
 
     let mut config = prost_build::Config::new();
@@ -49,13 +49,14 @@ fn main() -> Result<()> {
     config.type_attribute("airc.ipc.StatusPayload", "#[serde(default)]");
     config.type_attribute("airc.ipc.LogsPayload", "#[serde(default)]");
 
-    // aird_ipc.proto messages
-    config.type_attribute("airc.aird_ipc.AirdRequest", "#[serde(default)]");
-    config.type_attribute("airc.aird_ipc.ShutdownRequest", "#[serde(default)]");
-    config.type_attribute("airc.aird_ipc.PingRequest", "#[serde(default)]");
-    config.type_attribute("airc.aird_ipc.AirdResponse", "#[serde(default)]");
-    config.type_attribute("airc.aird_ipc.ShutdownResponse", "#[serde(default)]");
-    config.type_attribute("airc.aird_ipc.PingResponse", "#[serde(default)]");
+    // aircd_ipc.proto messages
+    config.type_attribute("airc.aircd_ipc.AircdRequest", "#[serde(default)]");
+    config.type_attribute("airc.aircd_ipc.ShutdownRequest", "#[serde(default)]");
+    config.type_attribute("airc.aircd_ipc.StatsRequest", "#[serde(default)]");
+    config.type_attribute("airc.aircd_ipc.AircdResponse", "#[serde(default)]");
+    config.type_attribute("airc.aircd_ipc.ShutdownResponse", "#[serde(default)]");
+    config.type_attribute("airc.aircd_ipc.StatsResponse", "#[serde(default)]");
+    config.type_attribute("airc.aircd_ipc.ChannelInfo", "#[serde(default)]");
 
     config.compile_protos(protos, &[proto_dir])?;
 

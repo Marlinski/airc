@@ -7,6 +7,8 @@
 
 use std::collections::VecDeque;
 use std::fs;
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::io::FromRawFd;
 use std::path::PathBuf;
 use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -100,33 +102,8 @@ pub async fn start(
     }
 
     if !foreground {
-        // Fork into background.
-        // We use a simple approach: re-exec ourselves with --foreground.
-        let exe = std::env::current_exe().map_err(|e| format!("cannot find exe: {e}"))?;
-        let mut cmd = process::Command::new(exe);
-        cmd.arg("connect")
-            .arg(&server)
-            .arg("--nick")
-            .arg(&nick)
-            .arg("--foreground");
-        if !auto_join.is_empty() {
-            cmd.arg("--join").arg(auto_join.join(","));
-        }
-        // Detach: redirect stdio to /dev/null and don't wait.
-        cmd.stdin(process::Stdio::null())
-            .stdout(process::Stdio::null())
-            .stderr(process::Stdio::null());
-        let child = cmd
-            .spawn()
-            .map_err(|e| format!("cannot spawn daemon: {e}"))?;
-        println!(
-            "daemon started (pid {}), connecting to {server} as {nick}",
-            child.id()
-        );
-        if !auto_join.is_empty() {
-            println!("auto-joining: {}", auto_join.join(", "));
-        }
-        return Ok(());
+        // Fork into background using a pipe to relay the MOTD back.
+        return spawn_background(&server, &nick, &auto_join);
     }
 
     // --- Foreground mode: this IS the daemon. ---
@@ -145,11 +122,16 @@ pub async fn start(
     // Connect to IRC.
     let config = airc_client::ClientConfig::new(&server, &nick).with_auto_join(auto_join);
 
-    let (client, mut event_rx) = IrcClient::connect(config)
+    let (client, motd_lines, mut event_rx) = IrcClient::connect(config)
         .await
         .map_err(|e| format!("IRC connection failed: {e}"))?;
 
     info!(nick = %client.nick().await, "connected to IRC, starting daemon");
+
+    // Output the MOTD. If we were spawned by the parent with AIRC_MOTD_FD,
+    // write to that pipe so the parent can display it. Otherwise print to
+    // stdout (user ran `airc connect --foreground` directly).
+    send_motd(&motd_lines);
 
     // Client-side logger (off by default, toggled via `airc log start/stop`).
     let logger: SharedLogger = Arc::new(Mutex::new(None));
@@ -238,6 +220,110 @@ pub async fn start(
     let _ = fs::remove_file(&pid_path);
     info!("daemon stopped");
     Ok(())
+}
+
+/// Spawn the daemon as a background child process with a pipe to relay the MOTD.
+fn spawn_background(server: &str, nick: &str, auto_join: &[String]) -> Result<(), String> {
+    // Create a pipe: child writes MOTD to fds[1], parent reads from fds[0].
+    let mut fds = [0i32; 2];
+    let ret = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    if ret != 0 {
+        return Err(format!("pipe failed: {}", std::io::Error::last_os_error()));
+    }
+    let read_fd = fds[0];
+    let write_fd = fds[1];
+
+    let exe = std::env::current_exe().map_err(|e| format!("cannot find exe: {e}"))?;
+    let mut cmd = process::Command::new(exe);
+    cmd.arg("connect")
+        .arg(server)
+        .arg("--nick")
+        .arg(nick)
+        .arg("--foreground");
+    if !auto_join.is_empty() {
+        cmd.arg("--join").arg(auto_join.join(","));
+    }
+
+    // Pass the pipe write fd number to the child via an env var.
+    // The child will write MOTD lines to this fd.
+    cmd.env("AIRC_MOTD_FD", write_fd.to_string());
+
+    // Detach: redirect stdio to /dev/null and don't wait.
+    cmd.stdin(process::Stdio::null())
+        .stdout(process::Stdio::null())
+        .stderr(process::Stdio::null());
+
+    // The write fd must be inherited by the child (not close-on-exec).
+    unsafe {
+        let flags = libc::fcntl(write_fd, libc::F_GETFD);
+        libc::fcntl(write_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+    }
+
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("cannot spawn daemon: {e}"))?;
+
+    // Close the write end in the parent — only the child writes.
+    unsafe {
+        libc::close(write_fd);
+    }
+
+    println!(
+        "daemon started (pid {}), connecting to {server} as {nick}",
+        child.id()
+    );
+    if !auto_join.is_empty() {
+        println!("auto-joining: {}", auto_join.join(", "));
+    }
+
+    // Read MOTD lines from the pipe (blocking is fine — parent waits for MOTD).
+    // Safety: read_fd is a valid fd from pipe().
+    let read_file = unsafe { std::fs::File::from_raw_fd(read_fd) };
+    let reader = BufReader::new(read_file);
+    let mut any_motd = false;
+    for line in reader.lines() {
+        match line {
+            Ok(l) => {
+                if !any_motd {
+                    println!();
+                    any_motd = true;
+                }
+                println!("{l}");
+            }
+            Err(_) => break,
+        }
+    }
+
+    Ok(())
+}
+
+/// Send MOTD lines to the appropriate output.
+///
+/// If `AIRC_MOTD_FD` is set, write to that pipe fd (we're a background child).
+/// Otherwise, print to stdout (user ran `airc connect --foreground` directly).
+fn send_motd(motd_lines: &[String]) {
+    if motd_lines.is_empty() {
+        return;
+    }
+
+    if let Ok(fd_str) = std::env::var("AIRC_MOTD_FD") {
+        // We're a background child — write to the pipe and close it.
+        if let Ok(fd) = fd_str.parse::<i32>() {
+            // Safety: the fd was inherited from the parent via pipe().
+            let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+            for line in motd_lines {
+                let _ = writeln!(file, "{line}");
+            }
+            // File is dropped here, closing the write end → parent sees EOF.
+        }
+    } else {
+        // Running directly in foreground — print to stdout.
+        println!();
+        for line in motd_lines {
+            println!("{line}");
+        }
+        println!();
+    }
 }
 
 // ---------------------------------------------------------------------------

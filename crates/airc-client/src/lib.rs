@@ -24,7 +24,7 @@
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = ClientConfig::new("irc.example.com:6667", "mybot");
-//! let (client, _events) = IrcClient::connect(config).await?;
+//! let (client, _motd, _events) = IrcClient::connect(config).await?;
 //! client.join("#lobby").await?;
 //! client.say("#lobby", "Hello from an agent!").await?;
 //! let msgs = client.fetch("#lobby").await;

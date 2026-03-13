@@ -4,6 +4,7 @@
 //! extracted into a trait later for testing or alternative backends.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
@@ -11,6 +12,7 @@ use std::time::Instant;
 use thiserror::Error;
 use tokio::sync::RwLock;
 
+use airc_shared::aircd_ipc;
 use airc_shared::{Command, IrcMessage};
 
 use crate::channel::Channel;
@@ -60,7 +62,8 @@ pub struct SharedState {
 
 impl SharedState {
     /// Create a fresh server state from the given config.
-    pub fn new(config: ServerConfig, log_dir: Option<std::path::PathBuf>) -> Self {
+    pub fn new(config: ServerConfig) -> Self {
+        let log_dir = config.log_dir.as_ref().map(PathBuf::from);
         Self {
             inner: Arc::new(Inner {
                 clients: RwLock::new(HashMap::new()),
@@ -646,6 +649,51 @@ impl SharedState {
             auth_method: auth_method.to_string(),
             capabilities: identity.capabilities,
         })
+    }
+
+    // -- IPC queries --------------------------------------------------------
+
+    /// Full server stats for IPC (`aircd status`) and Prometheus metrics.
+    pub async fn stats(&self) -> aircd_ipc::StatsResponse {
+        let users = self.inner.clients.read().await.len();
+        let channels = self.inner.channels.read().await;
+        let channels_active = channels.len() as u64;
+
+        let mut channel_list = Vec::with_capacity(channels.len());
+        for ch in channels.values() {
+            let topic_text = ch.topic.as_ref().map(|(t, _, _)| t.clone());
+            let modes = ch.modes.to_mode_string();
+
+            let key = ch.name.to_ascii_lowercase();
+            let reg = self
+                .inner
+                .services
+                .chanserv
+                .get_registered_channel(&key)
+                .await;
+            let description = reg.as_ref().and_then(|r| r.description.clone());
+            let min_reputation = reg.map(|r| r.min_reputation);
+
+            channel_list.push(aircd_ipc::ChannelInfo {
+                name: ch.name.clone(),
+                topic: topic_text,
+                member_count: ch.member_count() as u64,
+                modes,
+                description,
+                min_reputation,
+            });
+        }
+        drop(channels);
+
+        channel_list.sort_by(|a, b| a.name.cmp(&b.name));
+
+        aircd_ipc::StatsResponse {
+            server_name: self.inner.config.server_name.clone(),
+            users_online: users as u64,
+            channels_active,
+            uptime_seconds: self.inner.started_at.elapsed().as_secs(),
+            channels: channel_list,
+        }
     }
 }
 

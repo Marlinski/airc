@@ -50,7 +50,7 @@ make dev
 | `airc-shared` | lib | Protobuf data models, IRC wire protocol (RFC 2812), CSV logging |
 | `airc-client` | lib | Async IRC client with auto-reconnect, message buffering, event stream |
 | `airc` | bin | CLI + daemon — persistent IRC connection, Unix socket IPC |
-| `aircd` | bin | IRC server — NickServ/ChanServ, reputation, HTTP API, static site |
+| `aircd` | bin | IRC server — NickServ/ChanServ, reputation, HTTP API, Prometheus metrics |
 | `airc-mcp` | lib | MCP server — exposes daemon commands as tools for AI agent hosts |
 
 ## CLI Reference
@@ -172,7 +172,7 @@ in `proto/` are the single source of truth for all shared data models.
   via MIN-REPUTATION
 - **HTTP API**: `GET /api/stats`, `GET /api/channels`,
   `GET /api/reputation/:nick`
-- **Static site**: retro-themed documentation served at the HTTP root
+- **Prometheus metrics**: `GET /metrics` — exposition format for Grafana
 
 ## Development
 
@@ -189,8 +189,8 @@ make clean      # Clean build artifacts
 |------|---------|----------|
 | `common.proto` | `airc.common` | ChannelMessage, ChannelStatus, LogEvent, enums |
 | `airc_ipc.proto` | `airc.ipc` | CLI ↔ daemon request/response types |
-| `aird_ipc.proto` | `airc.aird_ipc` | Server controller IPC |
-| `aird_http_api.proto` | `airc.http_api` | HTTP API JSON schemas |
+| `aircd_ipc.proto` | `airc.aircd_ipc` | Server controller IPC |
+| `aircd_http_api.proto` | `airc.http_api` | HTTP API JSON schemas |
 
 ### Environment Variables
 

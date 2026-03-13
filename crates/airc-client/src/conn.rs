@@ -362,6 +362,23 @@ async fn handle_message(
             let _ = event_tx.send(IrcEvent::Notice { from, target, text }).await;
         }
 
+        // -- MOTD (375, 372, 376) --------------------------------------------
+        Command::Numeric(n) if *n == RPL_MOTDSTART => {
+            // 375 — start of MOTD. Nothing to emit; the body lines follow.
+        }
+        Command::Numeric(n) if *n == RPL_MOTD => {
+            // 372 — a single MOTD body line.
+            // params: <nick> :<motd line>
+            let line = msg.params.last().cloned().unwrap_or_default();
+            // Strip the conventional "- " prefix that IRC servers prepend.
+            let line = line.strip_prefix("- ").unwrap_or(&line).to_string();
+            let _ = event_tx.send(IrcEvent::Motd { line }).await;
+        }
+        Command::Numeric(n) if *n == RPL_ENDOFMOTD => {
+            // 376 — end of MOTD.
+            let _ = event_tx.send(IrcEvent::MotdEnd).await;
+        }
+
         // -- Everything else: emit as Raw ------------------------------------
         _ => {
             let _ = event_tx

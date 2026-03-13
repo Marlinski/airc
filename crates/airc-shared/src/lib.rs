@@ -10,12 +10,12 @@
 //! - [`log`] — CSV log file support (serialization, `FileLogger`)
 //! - [`common`] — shared protobuf-generated data models (messages, events)
 //! - [`ipc`] — CLI-to-daemon IPC protobuf types
-//! - [`aird_ipc`] — daemon controller IPC protobuf types
+//! - [`aircd_ipc`] — daemon controller IPC protobuf types
 //! - [`http_api`] — HTTP API protobuf types
 //!
 //! # Protobuf modules
 //!
-//! The `common`, `ipc`, `aird_ipc`, and `http_api` modules are generated from
+//! The `common`, `ipc`, `aircd_ipc`, and `http_api` modules are generated from
 //! `.proto` files in the `proto/` directory by `prost-build`. All generated
 //! types have serde derives for JSON serialization and `prost::Message` for
 //! binary protobuf encoding.
@@ -51,8 +51,8 @@ pub mod ipc {
     include!(concat!(env!("OUT_DIR"), "/airc.ipc.rs"));
 }
 
-pub mod aird_ipc {
-    include!(concat!(env!("OUT_DIR"), "/airc.aird_ipc.rs"));
+pub mod aircd_ipc {
+    include!(concat!(env!("OUT_DIR"), "/airc.aircd_ipc.rs"));
 }
 
 pub mod http_api {

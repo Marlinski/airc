@@ -7,7 +7,7 @@
 //! - `aircd start`              — launch the server in the background
 //! - `aircd start --foreground` — run the server in the current process
 //! - `aircd stop`               — graceful shutdown via IPC, or `-f` for SIGKILL
-//! - `aircd status`             — query server stats via the HTTP API
+//! - `aircd status`             — query server stats via IPC
 
 mod channel;
 mod client;
@@ -23,14 +23,16 @@ mod web;
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use prost::Message;
 
-use airc_shared::http_api::{ChannelsResponse, StatsResponse};
+use airc_shared::aircd_ipc;
+
+use crate::config::{CliOverrides, ServerConfig};
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -47,21 +49,21 @@ struct Cli {
 enum Commands {
     /// Start the IRC server.
     Start {
+        /// Path to TOML config file (defaults to ./aircd.toml if it exists).
+        #[arg(short, long)]
+        config: Option<String>,
+
         /// IRC bind address.
-        #[arg(long, default_value = "0.0.0.0:6667")]
-        bind: String,
+        #[arg(long)]
+        bind: Option<String>,
 
         /// Server hostname.
-        #[arg(long, default_value = "airc.local")]
-        name: String,
+        #[arg(long)]
+        name: Option<String>,
 
         /// HTTP API port.
-        #[arg(long, default_value_t = 8080)]
-        http_port: u16,
-
-        /// Path to the static site directory.
-        #[arg(long, default_value = "site")]
-        site_dir: String,
+        #[arg(long)]
+        http_port: Option<u16>,
 
         /// Run in foreground (don't daemonize).
         #[arg(long)]
@@ -81,10 +83,6 @@ enum Commands {
 
     /// Show server statistics.
     Status {
-        /// HTTP API port (must match the running server).
-        #[arg(long, default_value_t = 8080)]
-        http_port: u16,
-
         /// Output as JSON.
         #[arg(long)]
         json: bool,
@@ -123,18 +121,11 @@ fn ipc_socket_path() -> PathBuf {
 // Commands
 // ---------------------------------------------------------------------------
 
-fn cmd_start(
-    bind: String,
-    name: String,
-    http_port: u16,
-    site_dir: String,
-    foreground: bool,
-    log_dir: Option<String>,
-) {
+fn cmd_start(cfg: ServerConfig, foreground: bool) {
     if foreground {
         // When re-exec'd with --foreground, the parent already checked for
         // conflicts and wrote the PID file.  Skip straight to running.
-        run_server_foreground(bind, name, http_port, site_dir, log_dir);
+        run_server_foreground(cfg);
         return;
     }
 
@@ -150,8 +141,8 @@ fn cmd_start(
     }
 
     // Pre-flight: check that required ports are free.
-    check_port_available(&bind, "IRC");
-    check_port_available(&format!("0.0.0.0:{http_port}"), "HTTP API");
+    check_port_available(&cfg.bind_addr, "IRC");
+    check_port_available(&format!("0.0.0.0:{}", cfg.http_port), "HTTP API");
 
     // Daemonize: re-exec ourselves with --foreground.
     let exe = std::env::current_exe().unwrap_or_else(|e| {
@@ -166,19 +157,19 @@ fn cmd_start(
     });
     let log_stderr = log_file.try_clone().unwrap();
 
+    // Re-exec with explicit flags so the child inherits the resolved config
+    // (the child won't re-read the config file or env vars).
     let child = {
         let mut cmd = Command::new(&exe);
         cmd.arg("start")
             .arg("--foreground")
             .arg("--bind")
-            .arg(&bind)
+            .arg(&cfg.bind_addr)
             .arg("--name")
-            .arg(&name)
+            .arg(&cfg.server_name)
             .arg("--http-port")
-            .arg(http_port.to_string())
-            .arg("--site-dir")
-            .arg(&site_dir);
-        if let Some(ref dir) = log_dir {
+            .arg(cfg.http_port.to_string());
+        if let Some(ref dir) = cfg.log_dir {
             cmd.arg("--log-dir").arg(dir);
         }
         cmd.env(
@@ -198,8 +189,8 @@ fn cmd_start(
                 eprintln!("warning: cannot write PID file: {e}");
             });
             println!("server started (pid {pid})");
-            println!("  irc:  {bind}");
-            println!("  http: 0.0.0.0:{http_port}");
+            println!("  irc:  {}", cfg.bind_addr);
+            println!("  http: 0.0.0.0:{}", cfg.http_port);
             println!("  log:  {}", log_file_path.display());
 
             // Wait briefly and check it's still alive.
@@ -211,14 +202,12 @@ fn cmd_start(
                 std::process::exit(1);
             }
 
-            // Verify the HTTP API is reachable.
-            if !wait_for_http(http_port, 10) {
-                eprintln!(
-                    "\nwarning: server is running but HTTP API is not responding on port {http_port}"
-                );
+            // Verify the IPC socket is reachable (server is ready).
+            if !wait_for_ipc(10) {
+                eprintln!("\nwarning: server is running but IPC socket is not responding");
                 eprintln!("recent log output:");
                 print_log_tail(&log_file_path, 20);
-                // Kill the half-working server — no point keeping it without the API.
+                // Kill the half-working server.
                 kill_pid(pid, false);
                 let _ = fs::remove_file(&pid_file);
                 std::process::exit(1);
@@ -232,13 +221,7 @@ fn cmd_start(
 }
 
 /// Run the AIRC server in the current process (foreground mode).
-fn run_server_foreground(
-    bind: String,
-    name: String,
-    http_port: u16,
-    site_dir: String,
-    log_dir: Option<String>,
-) {
+fn run_server_foreground(cfg: ServerConfig) {
     use tracing_subscriber::EnvFilter;
 
     tracing_subscriber::fmt()
@@ -247,11 +230,7 @@ fn run_server_foreground(
         )
         .init();
 
-    let config = config::ServerConfig {
-        bind_addr: bind,
-        server_name: name,
-        ..Default::default()
-    };
+    let http_port = cfg.http_port;
 
     let rt = tokio::runtime::Runtime::new().unwrap_or_else(|e| {
         eprintln!("failed to create tokio runtime: {e}");
@@ -259,15 +238,14 @@ fn run_server_foreground(
     });
 
     rt.block_on(async {
-        let state = state::SharedState::new(config, log_dir.map(PathBuf::from));
+        let state = state::SharedState::new(cfg);
         state.create_default_channels().await;
 
         // Start HTTP API server.
         let http_addr = format!("0.0.0.0:{http_port}");
         let http_state = state.clone();
-        let site_dir_owned = site_dir.clone();
         let http_handle = tokio::spawn(async move {
-            if let Err(e) = web::serve(&http_addr, http_state, &site_dir_owned).await {
+            if let Err(e) = web::serve(&http_addr, http_state).await {
                 tracing::error!(error = %e, "HTTP server failed");
             }
         });
@@ -309,8 +287,19 @@ fn cmd_stop(force: bool) {
 
             // Try graceful IPC shutdown first.
             if sock_path.exists() {
-                match try_ipc_shutdown(&sock_path) {
-                    Ok(msg) => {
+                let req = aircd_ipc::AircdRequest {
+                    command: Some(aircd_ipc::aircd_request::Command::Shutdown(
+                        aircd_ipc::ShutdownRequest {
+                            reason: Some("aircd stop".to_string()),
+                        },
+                    )),
+                };
+                match ipc_request(&sock_path, &req) {
+                    Ok(resp) if resp.ok => {
+                        let msg = match resp.payload {
+                            Some(aircd_ipc::aircd_response::Payload::Shutdown(s)) => s.message,
+                            _ => "shutdown acknowledged".to_string(),
+                        };
                         println!("{msg}");
                         // Wait for process to exit.
                         for _ in 0..20 {
@@ -328,6 +317,10 @@ fn cmd_stop(force: bool) {
                         eprintln!(
                             "server did not exit after graceful shutdown, sending SIGTERM..."
                         );
+                    }
+                    Ok(resp) => {
+                        let err = resp.error.unwrap_or_else(|| "unknown error".to_string());
+                        eprintln!("IPC shutdown failed ({err}), falling back to SIGTERM...");
                     }
                     Err(e) => {
                         eprintln!("IPC shutdown failed ({e}), falling back to SIGTERM...");
@@ -359,11 +352,11 @@ fn cmd_stop(force: bool) {
     }
 }
 
-fn cmd_status(http_port: u16, json: bool) {
+fn cmd_status(json: bool) {
     // Check PID.
     let pid_file = pid_path();
     let pid = read_pid(&pid_file);
-    let running = pid.map(|p| is_process_alive(p)).unwrap_or(false);
+    let running = pid.map(is_process_alive).unwrap_or(false);
 
     if !running {
         if json {
@@ -374,10 +367,29 @@ fn cmd_status(http_port: u16, json: bool) {
         return;
     }
 
-    // Fetch stats from the HTTP API.
-    let stats = http_get::<StatsResponse>(&format!("http://127.0.0.1:{http_port}/api/stats"));
-    let channels =
-        http_get::<ChannelsResponse>(&format!("http://127.0.0.1:{http_port}/api/channels"));
+    // Fetch stats via IPC.
+    let sock_path = ipc_socket_path();
+    let req = aircd_ipc::AircdRequest {
+        command: Some(aircd_ipc::aircd_request::Command::Stats(
+            aircd_ipc::StatsRequest {},
+        )),
+    };
+
+    let stats = match ipc_request(&sock_path, &req) {
+        Ok(resp) if resp.ok => match resp.payload {
+            Some(aircd_ipc::aircd_response::Payload::Stats(s)) => Some(s),
+            _ => None,
+        },
+        Ok(resp) => {
+            let err = resp.error.unwrap_or_else(|| "unknown error".to_string());
+            eprintln!("IPC stats request failed: {err}");
+            None
+        }
+        Err(e) => {
+            eprintln!("cannot reach server via IPC: {e}");
+            None
+        }
+    };
 
     if json {
         let mut out = serde_json::Map::new();
@@ -393,11 +405,9 @@ fn cmd_status(http_port: u16, json: bool) {
                 serde_json::json!(s.channels_active),
             );
             out.insert("uptime_seconds".into(), serde_json::json!(s.uptime_seconds));
-        }
-        if let Some(ref c) = channels {
             out.insert(
                 "channels".into(),
-                serde_json::to_value(&c.channels).unwrap_or_default(),
+                serde_json::to_value(&s.channels).unwrap_or_default(),
             );
         }
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
@@ -413,13 +423,10 @@ fn cmd_status(http_port: u16, json: bool) {
         println!("  users:    {}", s.users_online);
         println!("  channels: {}", s.channels_active);
         println!("  uptime:   {}", format_duration(s.uptime_seconds));
-    } else {
-        println!("  (could not reach HTTP API on port {http_port})");
-    }
-    if let Some(ref c) = channels {
-        if !c.channels.is_empty() {
+
+        if !s.channels.is_empty() {
             println!();
-            for ch in &c.channels {
+            for ch in &s.channels {
                 let topic = ch.topic.as_deref().unwrap_or("(no topic)");
                 println!(
                     "  {:<20} {:>3} users  {}  {}",
@@ -427,32 +434,27 @@ fn cmd_status(http_port: u16, json: bool) {
                 );
             }
         }
+    } else {
+        println!("  (could not reach server via IPC)");
     }
 }
 
 // ---------------------------------------------------------------------------
-// IPC shutdown (synchronous — controller commands don't need async)
+// IPC helper (synchronous — controller commands don't need async)
 // ---------------------------------------------------------------------------
 
-/// Try to send a graceful shutdown request over the IPC Unix socket.
-/// Returns the server's response message on success.
-fn try_ipc_shutdown(sock_path: &PathBuf) -> Result<String, String> {
-    use prost::Message;
+/// Send a request to the running server over the IPC Unix socket and read the
+/// response. Uses length-prefixed protobuf frames.
+fn ipc_request(
+    sock_path: &PathBuf,
+    req: &aircd_ipc::AircdRequest,
+) -> Result<aircd_ipc::AircdResponse, String> {
     use std::os::unix::net::UnixStream;
 
     let mut stream = UnixStream::connect(sock_path).map_err(|e| format!("connect: {e}"))?;
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .map_err(|e| format!("set timeout: {e}"))?;
-
-    // Build the shutdown request.
-    let req = airc_shared::aird_ipc::AirdRequest {
-        command: Some(airc_shared::aird_ipc::aird_request::Command::Shutdown(
-            airc_shared::aird_ipc::ShutdownRequest {
-                reason: Some("aircd stop".to_string()),
-            },
-        )),
-    };
 
     // Write length-prefixed frame.
     let buf = req.encode_to_vec();
@@ -478,17 +480,7 @@ fn try_ipc_shutdown(sock_path: &PathBuf) -> Result<String, String> {
         .read_exact(&mut resp_buf)
         .map_err(|e| format!("read payload: {e}"))?;
 
-    let resp = airc_shared::aird_ipc::AirdResponse::decode(&resp_buf[..])
-        .map_err(|e| format!("decode: {e}"))?;
-
-    if resp.ok {
-        match resp.payload {
-            Some(airc_shared::aird_ipc::aird_response::Payload::Shutdown(s)) => Ok(s.message),
-            _ => Ok("shutdown acknowledged".to_string()),
-        }
-    } else {
-        Err(resp.error.unwrap_or_else(|| "unknown error".to_string()))
-    }
+    aircd_ipc::AircdResponse::decode(&resp_buf[..]).map_err(|e| format!("decode: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -526,11 +518,17 @@ fn check_port_available(addr: &str, label: &str) {
     }
 }
 
-/// Wait for the HTTP API to become reachable, retrying up to `max_attempts` times.
-fn wait_for_http(port: u16, max_attempts: u32) -> bool {
+/// Wait for the IPC socket to become reachable, retrying up to `max_attempts` times.
+fn wait_for_ipc(max_attempts: u32) -> bool {
+    let sock_path = ipc_socket_path();
+    let req = aircd_ipc::AircdRequest {
+        command: Some(aircd_ipc::aircd_request::Command::Stats(
+            aircd_ipc::StatsRequest {},
+        )),
+    };
     for _ in 0..max_attempts {
         std::thread::sleep(Duration::from_millis(250));
-        if http_get::<StatsResponse>(&format!("http://127.0.0.1:{port}/api/stats")).is_some() {
+        if ipc_request(&sock_path, &req).is_ok() {
             return true;
         }
     }
@@ -540,7 +538,7 @@ fn wait_for_http(port: u16, max_attempts: u32) -> bool {
 /// Print the last N lines of a log file to stderr.
 fn print_log_tail(path: &PathBuf, n: usize) {
     if let Ok(f) = fs::File::open(path) {
-        let lines: Vec<String> = BufReader::new(f).lines().flatten().collect();
+        let lines: Vec<String> = BufReader::new(f).lines().map_while(Result::ok).collect();
         let start = lines.len().saturating_sub(n);
         for line in &lines[start..] {
             eprintln!("  {line}");
@@ -567,55 +565,6 @@ fn is_process_alive(pid: u32) -> bool {
     }
 }
 
-/// Minimal HTTP GET using std::net (no async runtime needed for the CLI).
-fn http_get<T: serde::de::DeserializeOwned>(url: &str) -> Option<T> {
-    // Parse URL minimally: http://host:port/path
-    let url = url.strip_prefix("http://")?;
-    let (host_port, path) = url.split_once('/')?;
-    let path = format!("/{path}");
-
-    let stream = TcpStream::connect(host_port).ok()?;
-    stream.set_read_timeout(Some(Duration::from_secs(3))).ok()?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(3)))
-        .ok()?;
-
-    use std::io::Write;
-    let request = format!("GET {path} HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n\r\n");
-    (&stream).write_all(request.as_bytes()).ok()?;
-
-    let mut reader = BufReader::new(&stream);
-    let mut headers = String::new();
-
-    // Read status line.
-    reader.read_line(&mut headers).ok()?;
-    if !headers.contains("200") {
-        return None;
-    }
-
-    // Skip headers until blank line.
-    loop {
-        let mut line = String::new();
-        reader.read_line(&mut line).ok()?;
-        if line.trim().is_empty() {
-            break;
-        }
-    }
-
-    // Read body.
-    let mut body = String::new();
-    loop {
-        let mut line = String::new();
-        match reader.read_line(&mut line) {
-            Ok(0) => break,
-            Ok(_) => body.push_str(&line),
-            Err(_) => break,
-        }
-    }
-
-    serde_json::from_str(&body).ok()
-}
-
 /// Format seconds into a human-readable duration.
 fn format_duration(secs: u64) -> String {
     if secs < 60 {
@@ -638,14 +587,25 @@ fn main() {
 
     match cli.command {
         Commands::Start {
+            config: config_path,
             bind,
             name,
             http_port,
-            site_dir,
             foreground,
             log_dir,
-        } => cmd_start(bind, name, http_port, site_dir, foreground, log_dir),
+        } => {
+            let cfg = ServerConfig::load(
+                config_path.as_deref(),
+                CliOverrides {
+                    bind,
+                    name,
+                    http_port,
+                    log_dir,
+                },
+            );
+            cmd_start(cfg, foreground);
+        }
         Commands::Stop { force } => cmd_stop(force),
-        Commands::Status { http_port, json } => cmd_status(http_port, json),
+        Commands::Status { json } => cmd_status(json),
     }
 }

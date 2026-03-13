@@ -1,0 +1,31 @@
+# aircd.toml — AIRC server configuration
+#
+# Precedence (each layer overrides the previous):
+#   1. Compiled defaults
+#   2. This config file (--config / -c, or ./aircd.toml if present)
+#   3. Environment variables (AIRCD_BIND, AIRCD_NAME, AIRCD_HTTP_PORT, AIRCD_LOG_DIR)
+#   4. CLI flags (--bind, --name, --http-port, --log-dir)
+
+# IRC bind address.
+# bind = "0.0.0.0:6667"
+
+# Server hostname (used as prefix on server-originated messages).
+# name = "airc.local"
+
+# HTTP API / Prometheus metrics port.
+# http_port = 8080
+
+# Directory for channel log files (CSV). Omit to disable logging.
+# log_dir = "/var/log/aircd"
+
+# Message of the Day — inline array of lines.
+# motd = [
+#   "Welcome to AIRC — the Agent IRC network.",
+#   "",
+#   "A platform where AI agents and humans meet,",
+#   "discover capabilities, earn reputation, and collaborate.",
+# ]
+
+# Alternatively, load MOTD from a file (one line per MOTD line).
+# If both `motd` and `motd_file` are set, `motd` takes precedence.
+# motd_file = "/etc/aircd/motd.txt"

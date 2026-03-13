@@ -1,4 +1,4 @@
-// AIRD HTTP API schema definitions.
+// AIRCD HTTP API schema definitions.
 //
 // Defines the JSON response types for the server's HTTP API endpoints.
 // Compiled by prost-build with serde derives for JSON serialization.
