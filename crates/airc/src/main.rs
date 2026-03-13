@@ -113,6 +113,13 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+
+    /// Start the MCP server (stdio transport).
+    ///
+    /// Runs an MCP server over stdin/stdout for use with AI agent hosts
+    /// like Claude Desktop, OpenCode, or Cursor. All other airc commands
+    /// are exposed as MCP tools.
+    Mcp,
 }
 
 #[derive(Subcommand)]
@@ -206,6 +213,23 @@ async fn main() {
                 println!("{}", serde_json::to_string_pretty(&resp).unwrap());
             } else {
                 print_response(&resp);
+            }
+        },
+
+        Commands::Mcp => {
+            // The MCP server uses stdio for JSON-RPC, so tracing must go
+            // to stderr. Set it up here before handing off.
+            tracing_subscriber::fmt()
+                .with_writer(std::io::stderr)
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                )
+                .init();
+
+            if let Err(e) = airc_mcp::run().await {
+                eprintln!("error: {e}");
+                std::process::exit(1);
             }
         },
     }

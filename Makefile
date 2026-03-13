@@ -8,7 +8,7 @@ build:
 aircd:
 	cargo build --bin aircd
 
-# Build the CLI client
+# Build the CLI client (includes MCP server via `airc mcp`)
 airc:
 	cargo build --bin airc
 

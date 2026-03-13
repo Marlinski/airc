@@ -5,9 +5,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[[bin]]
-name = "airc-mcp"
-path = "src/main.rs"
+[lib]
+name = "airc_mcp"
+path = "src/lib.rs"
 
 [dependencies]
 airc-shared.workspace = true

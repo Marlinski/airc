@@ -16,6 +16,7 @@ name = "airc"
 version = "0.1.0"
 dependencies = [
  "airc-client",
+ "airc-mcp",
  "airc-shared",
  "clap",
  "prost",

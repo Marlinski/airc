@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 airc-shared.workspace = true
 airc-client.workspace = true
+airc-mcp = { path = "../airc-mcp" }
 prost.workspace = true
 tokio.workspace = true
 tracing.workspace = true
