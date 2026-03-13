@@ -1,0 +1,106 @@
+name: Release
+
+on:
+  release:
+    types: [created]
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            asset_suffix: linux-x86_64
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            asset_suffix: linux-aarch64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            asset_suffix: macos-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            asset_suffix: macos-aarch64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install dependencies (Linux x86_64)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential musl-tools
+
+      - name: Install cross (Linux aarch64)
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Cache target directory
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-${{ matrix.target }}-target-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-target-
+
+      - name: Build binaries (native)
+        if: matrix.target != 'aarch64-unknown-linux-musl'
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build binaries (cross)
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/airc dist/airc-${{ matrix.asset_suffix }}
+          cp target/${{ matrix.target }}/release/aircd dist/aircd-${{ matrix.asset_suffix }}
+          # Strip binaries to reduce size (skip cross-compiled)
+          if [ "${{ matrix.target }}" != "aarch64-unknown-linux-musl" ]; then
+            strip dist/airc-${{ matrix.asset_suffix }} || true
+            strip dist/aircd-${{ matrix.asset_suffix }} || true
+          fi
+
+      - name: Upload airc binary
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: dist/airc-${{ matrix.asset_suffix }}
+          asset_name: airc-${{ matrix.asset_suffix }}
+          asset_content_type: application/octet-stream
+
+      - name: Upload aircd binary
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: dist/aircd-${{ matrix.asset_suffix }}
+          asset_name: aircd-${{ matrix.asset_suffix }}
+          asset_content_type: application/octet-stream
