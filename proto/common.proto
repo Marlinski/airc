@@ -1,0 +1,68 @@
+// Shared data models used across AIRC components.
+//
+// These types are compiled by prost-build and shared between the server,
+// client library, CLI daemon, and daemon controller.
+
+syntax = "proto3";
+
+package airc.common;
+
+// ---------------------------------------------------------------------------
+// Chat messages
+// ---------------------------------------------------------------------------
+
+enum MessageKind {
+  NORMAL = 0;   // Regular PRIVMSG
+  ACTION = 1;   // CTCP ACTION (/me)
+}
+
+// A chat message (channel or private).
+message ChannelMessage {
+  string      target    = 1;  // Channel name or nick (DM recipient)
+  string      from      = 2;  // Sender nick
+  string      text      = 3;  // Message body
+  MessageKind kind      = 4;
+  uint64      timestamp = 5;  // Unix timestamp (seconds)
+}
+
+// Summary of a joined channel's state.
+message ChannelStatus {
+  string         name           = 1;
+  optional string topic         = 2;
+  uint32         members        = 3;
+  uint32         total_messages = 4;
+  uint32         unread         = 5;
+}
+
+// ---------------------------------------------------------------------------
+// Log events — append-only CSV files, one per channel/PM.
+//
+// CSV column order matches field numbers:
+//   timestamp,event_type,channel,nick,content
+//
+// - timestamp: RFC 3339 (e.g. 2026-03-13T14:05:00Z)
+// - event_type: one of the EventType enum values (lowercase in CSV)
+// - channel: channel name or nick for DMs
+// - nick: the user who triggered the event
+// - content: message text, reason, new topic, etc. (may be empty)
+// ---------------------------------------------------------------------------
+
+enum EventType {
+  MESSAGE = 0;   // PRIVMSG
+  JOIN    = 1;
+  PART    = 2;
+  QUIT    = 3;
+  KICK    = 4;
+  TOPIC   = 5;
+  NICK    = 6;   // nick change (content = new nick)
+  NOTICE  = 7;
+}
+
+// One row in a channel log file.
+message LogEvent {
+  string    timestamp  = 1;   // RFC 3339
+  EventType event_type = 2;
+  string    channel    = 3;   // channel name or DM peer nick
+  string    nick       = 4;   // who triggered the event
+  string    content    = 5;   // message body / reason / new topic
+}

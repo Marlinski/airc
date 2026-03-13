@@ -1,0 +1,98 @@
+// AIRC CLI <-> Daemon IPC protocol.
+//
+// Communication is over a Unix domain socket with length-prefixed protobuf
+// frames: [4 bytes big-endian length][protobuf payload].
+//
+// The CLI sends an IpcRequest, the daemon replies with an IpcResponse.
+// Each connection handles exactly one request/response pair.
+
+syntax = "proto3";
+
+package airc.ipc;
+
+import "common.proto";
+
+// ---------------------------------------------------------------------------
+// Request: CLI -> Daemon
+// ---------------------------------------------------------------------------
+
+message IpcRequest {
+  oneof command {
+    JoinRequest       join       = 1;
+    PartRequest       part       = 2;
+    SayRequest        say        = 3;
+    FetchRequest      fetch      = 4;
+    StatusRequest     status     = 5;
+    DisconnectRequest disconnect = 6;
+    LogStartRequest   log_start  = 7;
+    LogStopRequest    log_stop   = 8;
+    LogsRequest       logs       = 9;
+  }
+}
+
+message JoinRequest {
+  string channel = 1;
+}
+
+message PartRequest {
+  string          channel = 1;
+  optional string reason  = 2;
+}
+
+message SayRequest {
+  string target  = 1;
+  string message = 2;
+}
+
+message FetchRequest {
+  optional string channel = 1;   // Omit for all channels
+  optional uint32 last    = 2;   // Fetch last N instead of only unread
+}
+
+message StatusRequest {}
+
+message DisconnectRequest {}
+
+message LogStartRequest {
+  optional string dir = 1;   // Log directory (defaults to cwd)
+}
+
+message LogStopRequest {}
+
+message LogsRequest {
+  optional uint32 last    = 1;   // Number of recent events to return (default: 50)
+  optional string channel = 2;   // Filter by channel (omit for all)
+}
+
+// ---------------------------------------------------------------------------
+// Response: Daemon -> CLI
+// ---------------------------------------------------------------------------
+
+message IpcResponse {
+  bool            ok    = 1;
+  optional string error = 2;
+
+  oneof payload {
+    TextPayload     text     = 3;
+    FetchPayload    messages = 4;
+    StatusPayload   channels = 5;
+    LogsPayload     logs     = 6;
+  }
+}
+
+message TextPayload {
+  string text = 1;
+}
+
+message FetchPayload {
+  repeated airc.common.ChannelMessage messages = 1;
+}
+
+message StatusPayload {
+  string                              nick     = 1;
+  repeated airc.common.ChannelStatus  channels = 2;
+}
+
+message LogsPayload {
+  repeated airc.common.LogEvent events = 1;
+}

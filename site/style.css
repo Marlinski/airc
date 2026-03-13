@@ -1,0 +1,661 @@
+/* AIRC — Geocities-era Web Aesthetic
+ *
+ * This is what the web looked like in 1996.
+ * Gray backgrounds. Times New Roman. Beveled borders.
+ * Blue underlined links. Table layouts. Tiled textures.
+ * The mIRC crab logo is the one concession to modernity.
+ *
+ * Best viewed in Netscape Navigator 3.0 at 800x600.
+ */
+
+/* ── Tiled background texture ─────────────────── */
+
+body {
+  font-family: "Times New Roman", Times, Georgia, serif;
+  font-size: 16px;
+  line-height: 1.5;
+  color: #000;
+  /* Classic gray with subtle crosshatch tile */
+  background-color: #c0c0c0;
+  background-image:
+    linear-gradient(45deg, #b8b8b8 25%, transparent 25%),
+    linear-gradient(-45deg, #b8b8b8 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #b8b8b8 75%),
+    linear-gradient(-45deg, transparent 75%, #b8b8b8 75%);
+  background-size: 4px 4px;
+  background-position: 0 0, 0 2px, 2px -2px, -2px 0px;
+  margin: 0;
+  padding: 0;
+}
+
+/* ── Page wrapper ─────────────────────────────── */
+
+/* 90s sites were narrow and centered */
+.page-wrapper {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 0;
+}
+
+/* ── Navigation bar ───────────────────────────── */
+
+nav {
+  background: #000080;
+  padding: 6px 10px;
+  text-align: center;
+  border-bottom: 3px outset #808080;
+}
+
+nav .nav-inner {
+  max-width: 640px;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+nav .logo {
+  display: inline;
+  margin-right: 10px;
+}
+
+nav .logo img {
+  height: 28px;
+  width: auto;
+  vertical-align: middle;
+}
+
+nav .nav-toggle {
+  display: none;
+}
+
+nav .nav-links {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0;
+  align-items: center;
+}
+
+nav .nav-links li {
+  display: inline;
+}
+
+nav .nav-links li + li::before {
+  content: " | ";
+  color: #c0c0c0;
+  font-family: "Courier New", Courier, monospace;
+  font-size: 14px;
+}
+
+nav .nav-links a {
+  color: #ffff00;
+  font-family: "Courier New", Courier, monospace;
+  font-size: 14px;
+  font-weight: bold;
+  text-decoration: none;
+}
+
+nav .nav-links a:hover {
+  color: #ff00ff;
+  text-decoration: underline;
+}
+
+nav .nav-links a.active {
+  color: #00ffff;
+  text-decoration: underline;
+}
+
+/* ── Mobile nav ───────────────────────────────── */
+
+@media (max-width: 520px) {
+  nav .nav-toggle {
+    display: inline;
+    background: #000080;
+    color: #ffff00;
+    border: 2px outset #808080;
+    font-family: "Courier New", monospace;
+    font-size: 14px;
+    cursor: pointer;
+    padding: 2px 8px;
+    margin-left: auto;
+  }
+
+  nav .nav-links {
+    display: none;
+    width: 100%;
+    flex-direction: column;
+    align-items: center;
+    padding-top: 6px;
+  }
+
+  nav .nav-links.open {
+    display: flex;
+  }
+
+  nav .nav-links li + li::before {
+    display: none;
+  }
+}
+
+/* ── Main content area ────────────────────────── */
+
+main {
+  max-width: 640px;
+  margin: 0 auto;
+  background: #ffffff;
+  border: 2px inset #808080;
+  padding: 20px 24px 30px;
+}
+
+/* ── Headings ─────────────────────────────────── */
+
+h1 {
+  font-family: "Times New Roman", Times, serif;
+  font-size: 28px;
+  font-weight: bold;
+  color: #800000;
+  text-align: center;
+  margin: 10px 0 4px;
+  padding: 0;
+}
+
+h2 {
+  font-family: "Times New Roman", Times, serif;
+  font-size: 20px;
+  font-weight: bold;
+  color: #000080;
+  margin: 20px 0 6px;
+  padding: 0;
+}
+
+h3 {
+  font-family: "Times New Roman", Times, serif;
+  font-size: 16px;
+  font-weight: bold;
+  color: #008000;
+  margin: 14px 0 4px;
+  padding: 0;
+}
+
+h4 {
+  font-family: "Times New Roman", Times, serif;
+  font-size: 15px;
+  font-weight: bold;
+  color: #000;
+  margin: 10px 0 4px;
+}
+
+/* ── Horizontal rules — beveled 3D ────────────── */
+
+hr {
+  border: none;
+  border-top: 2px inset #808080;
+  margin: 18px 0;
+}
+
+/* ── Links — blue, underlined, purple visited ── */
+
+a {
+  color: #0000ee;
+  text-decoration: underline;
+}
+
+a:visited {
+  color: #551a8b;
+}
+
+a:hover {
+  color: #ff0000;
+}
+
+a:active {
+  color: #ff0000;
+}
+
+/* ── Paragraphs & lists ───────────────────────── */
+
+p {
+  margin: 0 0 10px;
+}
+
+ul, ol {
+  margin: 0 0 10px;
+  padding-left: 30px;
+}
+
+li {
+  margin-bottom: 3px;
+}
+
+strong {
+  font-weight: bold;
+}
+
+em, .muted {
+  font-style: italic;
+  color: #666;
+}
+
+/* ── Code — Courier, gray background ──────────── */
+
+code {
+  font-family: "Courier New", Courier, monospace;
+  font-size: 14px;
+  background: #e8e8e8;
+  padding: 1px 4px;
+  border: 1px solid #999;
+}
+
+pre {
+  font-family: "Courier New", Courier, monospace;
+  font-size: 13px;
+  background: #000;
+  color: #00ff00;
+  border: 2px inset #808080;
+  padding: 10px 12px;
+  margin: 8px 0 14px;
+  overflow-x: auto;
+  white-space: pre;
+  line-height: 1.4;
+}
+
+pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  color: #00ff00;
+  font-size: 13px;
+}
+
+/* ── Tables — classic bordered ────────────────── */
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  border: 2px outset #808080;
+  margin: 8px 0 14px;
+  font-size: 14px;
+  background: #fff;
+}
+
+th {
+  background: #000080;
+  color: #fff;
+  font-weight: bold;
+  font-size: 13px;
+  text-align: left;
+  padding: 4px 8px;
+  border: 1px inset #808080;
+}
+
+td {
+  padding: 3px 8px;
+  border: 1px inset #808080;
+  vertical-align: top;
+}
+
+tr:nth-child(even) {
+  background: #f0f0f0;
+}
+
+td code {
+  background: none;
+  border: none;
+  padding: 0;
+  color: #800000;
+}
+
+/* ── Definition lists ─────────────────────────── */
+
+dl {
+  margin: 0 0 14px;
+}
+
+dt {
+  font-weight: bold;
+  color: #000080;
+  margin-top: 8px;
+}
+
+dd {
+  margin-left: 20px;
+  margin-top: 2px;
+}
+
+/* ── Hero section (index page) ────────────────── */
+
+.hero {
+  text-align: center;
+  padding: 10px 0;
+}
+
+.hero h1 {
+  font-size: 24px;
+  color: #800000;
+  margin-bottom: 2px;
+}
+
+.hero .ascii-art {
+  font-family: "Courier New", Courier, monospace;
+  font-size: 10px;
+  line-height: 1.15;
+  color: #008000;
+  white-space: pre;
+  display: inline-block;
+  text-align: left;
+  margin: 10px 0;
+}
+
+.hero .tagline {
+  font-size: 15px;
+  font-style: italic;
+  color: #333;
+  margin: 8px auto 14px;
+  max-width: 480px;
+}
+
+.hero .connect-box {
+  display: inline-block;
+  background: #000;
+  color: #00ff00;
+  font-family: "Courier New", Courier, monospace;
+  font-size: 16px;
+  font-weight: bold;
+  padding: 6px 16px;
+  border: 2px inset #808080;
+}
+
+/* No pseudo-elements on connect-box in Geocities mode */
+.hero .connect-box::before,
+.hero .connect-box::after {
+  content: none;
+}
+
+/* ── Feature cards (now just bordered boxes) ──── */
+
+.card-grid {
+  display: block;
+  margin: 10px 0 16px;
+}
+
+.card {
+  border: 2px outset #808080;
+  background: #ffffcc;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+}
+
+.card::before {
+  content: none;
+}
+
+.card h3 {
+  margin: 0 0 4px;
+  font-size: 15px;
+  color: #800000;
+}
+
+.card h3::before {
+  content: none;
+}
+
+.card p {
+  margin: 0;
+  font-size: 14px;
+}
+
+/* ── Live stats ───────────────────────────────── */
+
+.stat-value {
+  font-family: "Courier New", Courier, monospace;
+  font-size: 28px;
+  font-weight: bold;
+  color: #ff0000;
+  margin: 0;
+}
+
+/* ── Note / callout box ───────────────────────── */
+
+.note {
+  background: #ffffcc;
+  border: 2px outset #808080;
+  padding: 8px 12px;
+  margin: 8px 0 14px;
+  font-size: 14px;
+}
+
+.note::before {
+  content: none;
+}
+
+/* ── Lookup form ──────────────────────────────── */
+
+.lookup-form {
+  display: flex;
+  gap: 4px;
+  margin: 8px 0 10px;
+}
+
+.lookup-form input {
+  flex: 1;
+  padding: 4px 6px;
+  font-family: "Courier New", Courier, monospace;
+  font-size: 14px;
+  border: 2px inset #808080;
+  background: #fff;
+  color: #000;
+}
+
+.lookup-form input:focus {
+  outline: 1px dotted #000;
+}
+
+.lookup-form button {
+  padding: 4px 14px;
+  font-family: "Times New Roman", Times, serif;
+  font-size: 14px;
+  font-weight: bold;
+  background: #c0c0c0;
+  color: #000;
+  border: 2px outset #808080;
+  cursor: pointer;
+}
+
+.lookup-form button:hover {
+  background: #d0d0d0;
+}
+
+.lookup-form button:active {
+  border-style: inset;
+}
+
+/* ── Marquee ──────────────────────────────────── */
+
+.marquee-bar {
+  background: #000080;
+  color: #ffff00;
+  font-family: "Courier New", Courier, monospace;
+  font-size: 13px;
+  font-weight: bold;
+  padding: 4px 0;
+  overflow: hidden;
+  white-space: nowrap;
+  border-top: 2px outset #808080;
+  border-bottom: 2px outset #808080;
+  margin-bottom: 10px;
+}
+
+.marquee-bar .marquee-text {
+  display: inline-block;
+  animation: marquee-scroll 18s linear infinite;
+  padding-left: 100%;
+}
+
+@keyframes marquee-scroll {
+  0%   { transform: translateX(0); }
+  100% { transform: translateX(-100%); }
+}
+
+/* ── Footer ───────────────────────────────────── */
+
+footer {
+  max-width: 640px;
+  margin: 0 auto;
+  background: #fff;
+  border: 2px inset #808080;
+  border-top: none;
+  text-align: center;
+  padding: 12px 20px;
+  font-size: 12px;
+  color: #666;
+}
+
+footer::before,
+footer::after {
+  content: none;
+}
+
+/* ── Visitor counter ──────────────────────────── */
+
+.visitor-counter {
+  display: inline-block;
+  background: #000;
+  color: #00ff00;
+  font-family: "Courier New", Courier, monospace;
+  font-size: 14px;
+  font-weight: bold;
+  padding: 2px 10px;
+  border: 2px inset #808080;
+  margin: 6px 0;
+  letter-spacing: 2px;
+}
+
+/* ── "Best viewed" badge ──────────────────────── */
+
+.best-viewed {
+  font-size: 11px;
+  font-style: italic;
+  color: #999;
+  margin-top: 6px;
+}
+
+/* ── Horizontal rule variants ─────────────────── */
+
+.hr-fancy {
+  text-align: center;
+  border: none;
+  margin: 16px 0;
+  font-size: 12px;
+  color: #999;
+  letter-spacing: 4px;
+}
+
+.hr-fancy::before {
+  content: "~ * ~ * ~ * ~ * ~ * ~";
+}
+
+/* ── "Under construction" banner ──────────────── */
+
+.under-construction {
+  text-align: center;
+  padding: 8px;
+  margin: 10px 0;
+  background: #ffff00;
+  border: 2px outset #808080;
+  font-weight: bold;
+  font-size: 14px;
+  color: #000;
+}
+
+/* ── Guestbook link ───────────────────────────── */
+
+.guestbook-link {
+  text-align: center;
+  margin: 10px 0;
+  font-size: 15px;
+}
+
+/* ── Webring ──────────────────────────────────── */
+
+.webring {
+  text-align: center;
+  border: 2px outset #808080;
+  background: #e8e8e8;
+  padding: 6px 12px;
+  margin: 10px 0;
+  font-size: 12px;
+}
+
+.webring a {
+  margin: 0 6px;
+}
+
+/* ── "NEW!" blink ─────────────────────────────── */
+
+.blink {
+  animation: blink-text 1s step-end infinite;
+  color: #ff0000;
+  font-weight: bold;
+}
+
+@keyframes blink-text {
+  50% { opacity: 0; }
+}
+
+/* ── Status indicator ─────────────────────────── */
+
+.status-line {
+  font-size: 13px;
+  color: #666;
+  margin-bottom: 10px;
+  padding: 3px 0;
+  border-bottom: 1px solid #999;
+}
+
+.status-line .online {
+  color: #008000;
+  font-weight: bold;
+}
+
+/* ── Theme toggle button (styled for retro) ──── */
+
+.theme-toggle {
+  margin-left: auto;
+  background: #c0c0c0;
+  color: #000;
+  border: 2px outset #808080;
+  font-family: "Courier New", Courier, monospace;
+  font-size: 11px;
+  font-weight: bold;
+  padding: 2px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.theme-toggle:active {
+  border-style: inset;
+}
+
+/* ── Selection ────────────────────────────────── */
+
+::selection {
+  background: #000080;
+  color: #fff;
+}
+
+/* ── Responsive (90s sites didn't do this, but we're kind) ── */
+
+@media (max-width: 660px) {
+  main {
+    margin: 0 4px;
+  }
+
+  .hero .ascii-art {
+    font-size: 7px;
+  }
+}

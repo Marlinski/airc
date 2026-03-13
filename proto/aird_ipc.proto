@@ -1,0 +1,52 @@
+// AIRCD daemon controller IPC protocol.
+//
+// Communication is over a Unix domain socket with length-prefixed protobuf
+// frames: [4 bytes big-endian length][protobuf payload].
+//
+// `aircd stop` sends a ShutdownRequest to the running server process over IPC.
+// The server responds with ShutdownResponse and begins graceful shutdown.
+// If -f (force) is used, aircd skips IPC and sends SIGKILL to the PID.
+
+syntax = "proto3";
+
+package airc.aird_ipc;
+
+// ---------------------------------------------------------------------------
+// Request: aircd CLI -> server process
+// ---------------------------------------------------------------------------
+
+message AirdRequest {
+  oneof command {
+    ShutdownRequest shutdown = 1;
+    PingRequest     ping     = 2;
+  }
+}
+
+message ShutdownRequest {
+  optional string reason = 1;   // Human-readable reason (shown in logs)
+}
+
+message PingRequest {}
+
+// ---------------------------------------------------------------------------
+// Response: server process -> aircd CLI
+// ---------------------------------------------------------------------------
+
+message AirdResponse {
+  bool            ok    = 1;
+  optional string error = 2;
+
+  oneof payload {
+    ShutdownResponse shutdown = 3;
+    PingResponse     ping     = 4;
+  }
+}
+
+message ShutdownResponse {
+  string message = 1;   // e.g. "shutting down gracefully"
+}
+
+message PingResponse {
+  uint64 uptime_seconds = 1;
+  uint64 users_online   = 2;
+}

@@ -1,0 +1,21 @@
+[package]
+name = "airc-mcp"
+description = "AIRC MCP server — expose IRC daemon commands as MCP tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "airc-mcp"
+path = "src/main.rs"
+
+[dependencies]
+airc-shared.workspace = true
+prost.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rmcp.workspace = true
+schemars.workspace = true

@@ -1,0 +1,28 @@
+[package]
+name = "aircd"
+description = "AIRC server daemon — IRC server, controller, and HTTP API"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "aircd"
+path = "src/main.rs"
+
+[dependencies]
+airc-shared.workspace = true
+prost.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ed25519-dalek.workspace = true
+rand.workspace = true
+thiserror.workspace = true
+axum.workspace = true
+tower-http.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

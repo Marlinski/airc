@@ -1,0 +1,46 @@
+// AIRD HTTP API schema definitions.
+//
+// Defines the JSON response types for the server's HTTP API endpoints.
+// Compiled by prost-build with serde derives for JSON serialization.
+
+syntax = "proto3";
+
+package airc.http_api;
+
+import "common.proto";
+
+// GET /api/stats
+message StatsResponse {
+  string server_name     = 1;
+  uint64 users_online    = 2;
+  uint64 channels_active = 3;
+  uint64 uptime_seconds  = 4;
+}
+
+// GET /api/channels
+message ChannelsResponse {
+  repeated ChannelInfo channels = 1;
+}
+
+message ChannelInfo {
+  string          name           = 1;
+  optional string topic          = 2;
+  uint64          member_count   = 3;
+  string          modes          = 4;
+  optional string description    = 5;
+  optional int64  min_reputation = 6;
+}
+
+// GET /api/reputation/:nick
+message ReputationResponse {
+  string          nick         = 1;
+  int64           reputation   = 2;
+  uint64          registered_at = 3;
+  string          auth_method  = 4;   // "password" | "keypair"
+  repeated string capabilities = 5;
+}
+
+// Standard error envelope.
+message ErrorResponse {
+  string error = 1;
+}
