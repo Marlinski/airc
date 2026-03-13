@@ -85,13 +85,18 @@ pub async fn start(
 ) -> Result<(), String> {
     // Check if daemon is already running.
     let sock_path = ipc::socket_path();
+    let pid_path = ipc::pid_path();
     if sock_path.exists() {
         // Try connecting to see if it's alive.
         if tokio::net::UnixStream::connect(&sock_path).await.is_ok() {
             return Err("daemon is already running. Use `airc disconnect` first.".to_string());
         }
-        // Stale socket, remove it.
+        // Stale socket — previous daemon crashed. Clean up both socket and PID file.
         let _ = fs::remove_file(&sock_path);
+        let _ = fs::remove_file(&pid_path);
+    } else if pid_path.exists() {
+        // Socket is gone but PID file lingers — clean it up too.
+        let _ = fs::remove_file(&pid_path);
     }
 
     if !foreground {
@@ -135,7 +140,6 @@ pub async fn start(
         .init();
 
     // Write PID file.
-    let pid_path = ipc::pid_path();
     let _ = fs::write(&pid_path, process::id().to_string());
 
     // Connect to IRC.
