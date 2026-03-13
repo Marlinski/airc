@@ -228,16 +228,38 @@ impl ClientState {
         all
     }
 
-    /// Fetch the last N messages from a channel (does NOT advance cursor).
+    /// Fetch the last N messages from a channel and mark all as read.
+    ///
+    /// Returns at most `n` messages from the tail of the buffer. The read
+    /// cursor is advanced to the end regardless of how many messages are
+    /// returned, so any earlier unread messages are implicitly consumed.
     pub async fn fetch_last(&self, channel: &str, n: usize) -> Vec<ChannelMessage> {
-        let inner = self.inner.read().await;
+        let mut inner = self.inner.write().await;
         let key = channel.to_ascii_lowercase();
-        if let Some(ch) = inner.channels.get(&key) {
+        if let Some(ch) = inner.channels.get_mut(&key) {
             let start = ch.messages.len().saturating_sub(n);
-            ch.messages.iter().skip(start).cloned().collect()
+            let msgs = ch.messages.iter().skip(start).cloned().collect();
+            ch.read_cursor = ch.messages.len();
+            msgs
         } else {
             Vec::new()
         }
+    }
+
+    /// Fetch the last N messages from ALL channels and mark all as read.
+    ///
+    /// Messages are sorted by timestamp. The read cursor on every channel
+    /// is advanced to the end.
+    pub async fn fetch_last_all(&self, n: usize) -> Vec<ChannelMessage> {
+        let mut inner = self.inner.write().await;
+        let mut all = Vec::new();
+        for ch in inner.channels.values_mut() {
+            all.extend(ch.messages.iter().cloned());
+            ch.read_cursor = ch.messages.len();
+        }
+        all.sort_by_key(|m| m.timestamp);
+        let start = all.len().saturating_sub(n);
+        all.split_off(start)
     }
 
     /// Get a summary of all channels: name, unread count, member count.

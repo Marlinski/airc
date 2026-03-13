@@ -20,6 +20,10 @@ use airc_shared::ipc::ipc_response::Payload;
 #[derive(Parser)]
 #[command(name = "airc", about = "AIRC — IRC for AI agents", version)]
 struct Cli {
+    /// Session ID to target (when multiple sessions exist in the same directory).
+    #[arg(short = 's', long = "session", global = true)]
+    session: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -149,22 +153,57 @@ async fn main() {
                 .map(|j| j.split(',').map(|s| s.trim().to_string()).collect())
                 .unwrap_or_default();
 
-            if let Err(e) = daemon::start(server, nick, auto_join, foreground).await {
+            // If a session was explicitly provided via --session, use it.
+            // Otherwise, check if an active session already exists in cwd
+            // — if so, error out. If not, generate a new session ID.
+            let cwd = std::env::current_dir().unwrap_or_else(|e| {
+                eprintln!("error: cannot determine working directory: {e}");
+                std::process::exit(1);
+            });
+
+            let session_id = if let Some(ref id) = cli.session {
+                id.clone()
+            } else {
+                // Check for any existing live session in cwd.
+                if let Ok(info) = ipc::discover_socket(&cwd, None) {
+                    if tokio::net::UnixStream::connect(&info.path).await.is_ok() {
+                        eprintln!(
+                            "error: already connected (session {}). \
+                             Use `airc disconnect` first, or `--session <id>` to start a new session.",
+                            info.session_id
+                        );
+                        std::process::exit(1);
+                    }
+                    // Stale socket — clean it up.
+                    let _ = std::fs::remove_file(&info.path);
+                }
+                ipc::generate_session_id()
+            };
+
+            if let Err(e) =
+                daemon::start(session_id.clone(), server, nick, auto_join, foreground).await
+            {
                 eprintln!("error: {e}");
                 std::process::exit(1);
             }
+
+            // Print the session ID so callers can capture it.
+            eprintln!("session: {session_id}");
         }
 
         Commands::Join { channel } => {
-            send_command(Command::Join(ipc::JoinRequest { channel })).await;
+            let sock = discover_or_exit(&cli.session);
+            send_command(&sock, Command::Join(ipc::JoinRequest { channel })).await;
         }
 
         Commands::Part { channel, reason } => {
-            send_command(Command::Part(ipc::PartRequest { channel, reason })).await;
+            let sock = discover_or_exit(&cli.session);
+            send_command(&sock, Command::Part(ipc::PartRequest { channel, reason })).await;
         }
 
         Commands::Say { target, message } => {
-            send_command(Command::Say(ipc::SayRequest { target, message })).await;
+            let sock = discover_or_exit(&cli.session);
+            send_command(&sock, Command::Say(ipc::SayRequest { target, message })).await;
         }
 
         Commands::Fetch {
@@ -172,7 +211,9 @@ async fn main() {
             last,
             json,
         } => {
-            let resp = send_command(Command::Fetch(ipc::FetchRequest { channel, last })).await;
+            let sock = discover_or_exit(&cli.session);
+            let resp =
+                send_command(&sock, Command::Fetch(ipc::FetchRequest { channel, last })).await;
             if json {
                 println!("{}", serde_json::to_string_pretty(&resp).unwrap());
             } else {
@@ -181,7 +222,8 @@ async fn main() {
         }
 
         Commands::Status { json } => {
-            let resp = send_command(Command::Status(ipc::StatusRequest {})).await;
+            let sock = discover_or_exit(&cli.session);
+            let resp = send_command(&sock, Command::Status(ipc::StatusRequest {})).await;
             if json {
                 println!("{}", serde_json::to_string_pretty(&resp).unwrap());
             } else {
@@ -190,27 +232,38 @@ async fn main() {
         }
 
         Commands::Disconnect => {
-            send_command(Command::Disconnect(ipc::DisconnectRequest {})).await;
+            let sock = discover_or_exit(&cli.session);
+            send_command(&sock, Command::Disconnect(ipc::DisconnectRequest {})).await;
+            // The daemon removes the socket file on shutdown, but clean up
+            // from our side too in case it didn't get the chance.
+            let _ = std::fs::remove_file(&sock);
         }
 
-        Commands::Log { action } => match action {
-            LogAction::Start { dir } => {
-                send_command(Command::LogStart(ipc::LogStartRequest { dir })).await;
+        Commands::Log { action } => {
+            let sock = discover_or_exit(&cli.session);
+            match action {
+                LogAction::Start { dir } => {
+                    send_command(&sock, Command::LogStart(ipc::LogStartRequest { dir })).await;
+                }
+                LogAction::Stop => {
+                    send_command(&sock, Command::LogStop(ipc::LogStopRequest {})).await;
+                }
             }
-            LogAction::Stop => {
-                send_command(Command::LogStop(ipc::LogStopRequest {})).await;
-            }
-        },
+        }
 
         Commands::Logs {
             last,
             channel,
             json,
         } => {
-            let resp = send_command(Command::Logs(ipc::LogsRequest {
-                last: Some(last),
-                channel,
-            }))
+            let sock = discover_or_exit(&cli.session);
+            let resp = send_command(
+                &sock,
+                Command::Logs(ipc::LogsRequest {
+                    last: Some(last),
+                    channel,
+                }),
+            )
             .await;
             if json {
                 println!("{}", serde_json::to_string_pretty(&resp).unwrap());
@@ -238,12 +291,27 @@ async fn main() {
     }
 }
 
+/// Discover the session socket in cwd, or exit with a helpful error.
+fn discover_or_exit(session: &Option<String>) -> std::path::PathBuf {
+    let cwd = std::env::current_dir().unwrap_or_else(|e| {
+        eprintln!("error: cannot determine working directory: {e}");
+        std::process::exit(1);
+    });
+    match ipc::discover_socket(&cwd, session.as_deref()) {
+        Ok(info) => info.path,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
 /// Build an IpcRequest from a command, send it, and return the response.
-async fn send_command(command: Command) -> ipc::IpcResponse {
+async fn send_command(sock_path: &std::path::Path, command: Command) -> ipc::IpcResponse {
     let req = ipc::IpcRequest {
         command: Some(command),
     };
-    match ipc::send_request(&req).await {
+    match ipc::send_request(sock_path, &req).await {
         Ok(resp) => {
             if let Some(ref err) = resp.error {
                 eprintln!("error: {err}");

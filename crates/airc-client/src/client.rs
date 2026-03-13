@@ -195,9 +195,14 @@ impl IrcClient {
         self.state.fetch_all().await
     }
 
-    /// Fetch the last N messages from a channel (does NOT advance cursor).
+    /// Fetch the last N messages from a channel and mark all as read.
     pub async fn fetch_last(&self, channel: &str, n: usize) -> Vec<ChannelMessage> {
         self.state.fetch_last(channel, n).await
+    }
+
+    /// Fetch the last N messages from all channels and mark all as read.
+    pub async fn fetch_last_all(&self, n: usize) -> Vec<ChannelMessage> {
+        self.state.fetch_last_all(n).await
     }
 
     // -- NickServ helpers ----------------------------------------------------

@@ -80,30 +80,15 @@ fn read_log_ring(
 
 /// Start the daemon: connect to IRC, then listen for CLI commands.
 pub async fn start(
+    session_id: String,
     server: String,
     nick: String,
     auto_join: Vec<String>,
     foreground: bool,
 ) -> Result<(), String> {
-    // Check if daemon is already running.
-    let sock_path = ipc::socket_path();
-    let pid_path = ipc::pid_path();
-    if sock_path.exists() {
-        // Try connecting to see if it's alive.
-        if tokio::net::UnixStream::connect(&sock_path).await.is_ok() {
-            return Err("daemon is already running. Use `airc disconnect` first.".to_string());
-        }
-        // Stale socket — previous daemon crashed. Clean up both socket and PID file.
-        let _ = fs::remove_file(&sock_path);
-        let _ = fs::remove_file(&pid_path);
-    } else if pid_path.exists() {
-        // Socket is gone but PID file lingers — clean it up too.
-        let _ = fs::remove_file(&pid_path);
-    }
-
     if !foreground {
         // Fork into background using a pipe to relay the MOTD back.
-        return spawn_background(&server, &nick, &auto_join);
+        return spawn_background(&session_id, &server, &nick, &auto_join);
     }
 
     // --- Foreground mode: this IS the daemon. ---
@@ -116,8 +101,19 @@ pub async fn start(
         )
         .init();
 
-    // Write PID file.
-    let _ = fs::write(&pid_path, process::id().to_string());
+    // Build the socket path: .airc-<id>-<pid>.sock in the current directory.
+    let cwd =
+        std::env::current_dir().map_err(|e| format!("cannot determine working directory: {e}"))?;
+    let sock_path = ipc::socket_path(&cwd, &session_id, process::id());
+
+    // Check for stale socket with the same name (unlikely but possible).
+    if sock_path.exists() {
+        if tokio::net::UnixStream::connect(&sock_path).await.is_ok() {
+            return Err("daemon is already running. Use `airc disconnect` first.".to_string());
+        }
+        // Stale socket — previous daemon crashed. Clean up.
+        let _ = fs::remove_file(&sock_path);
+    }
 
     // Connect to IRC.
     let config = airc_client::ClientConfig::new(&server, &nick).with_auto_join(auto_join);
@@ -217,13 +213,17 @@ pub async fn start(
     // Cleanup.
     drop(listener);
     let _ = fs::remove_file(&sock_path);
-    let _ = fs::remove_file(&pid_path);
     info!("daemon stopped");
     Ok(())
 }
 
 /// Spawn the daemon as a background child process with a pipe to relay the MOTD.
-fn spawn_background(server: &str, nick: &str, auto_join: &[String]) -> Result<(), String> {
+fn spawn_background(
+    session_id: &str,
+    server: &str,
+    nick: &str,
+    auto_join: &[String],
+) -> Result<(), String> {
     // Create a pipe: child writes MOTD to fds[1], parent reads from fds[0].
     let mut fds = [0i32; 2];
     let ret = unsafe { libc::pipe(fds.as_mut_ptr()) };
@@ -235,7 +235,9 @@ fn spawn_background(server: &str, nick: &str, auto_join: &[String]) -> Result<()
 
     let exe = std::env::current_exe().map_err(|e| format!("cannot find exe: {e}"))?;
     let mut cmd = process::Command::new(exe);
-    cmd.arg("connect")
+    cmd.arg("--session")
+        .arg(session_id)
+        .arg("connect")
         .arg(server)
         .arg("--nick")
         .arg(nick)
@@ -458,11 +460,7 @@ async fn execute_request(
             let messages = match (channel, last) {
                 (Some(ch), Some(n)) => client.fetch_last(ch, n).await,
                 (Some(ch), None) => client.fetch(ch).await,
-                (None, Some(n)) => {
-                    let all = client.fetch_all().await;
-                    let start = all.len().saturating_sub(n);
-                    all[start..].to_vec()
-                }
+                (None, Some(n)) => client.fetch_last_all(n).await,
                 (None, None) => client.fetch_all().await,
             };
             ipc::response_messages(messages)

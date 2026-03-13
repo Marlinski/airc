@@ -35,12 +35,39 @@ use rmcp::{ServerHandler, ServiceExt, tool};
 // IPC helpers (duplicated from crates/airc/src/ipc.rs to avoid a lib dep)
 // ---------------------------------------------------------------------------
 
-/// Path to the daemon's Unix socket.
-fn socket_path() -> PathBuf {
-    let dir = std::env::var("XDG_RUNTIME_DIR")
-        .or_else(|_| std::env::var("TMPDIR"))
-        .unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(dir).join("airc.pid")
+/// Glob pattern for airc session sockets.
+const SOCK_GLOB: &str = ".airc-*.sock";
+
+/// Find the session socket in the current directory.
+///
+/// Expects exactly one `.airc-*.sock` file. Errors if zero or multiple found.
+fn discover_socket() -> Result<PathBuf, String> {
+    let cwd =
+        std::env::current_dir().map_err(|e| format!("cannot determine working directory: {e}"))?;
+    let pattern = cwd.join(SOCK_GLOB);
+    let pattern_str = pattern.to_string_lossy();
+
+    let mut sockets = Vec::new();
+    if let Ok(entries) = glob::glob(&pattern_str) {
+        for entry in entries.flatten() {
+            sockets.push(entry);
+        }
+    }
+
+    match sockets.len() {
+        0 => Err("no session found — use the `connect` tool first".to_string()),
+        1 => Ok(sockets.into_iter().next().unwrap()),
+        n => {
+            let names: Vec<_> = sockets
+                .iter()
+                .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                .collect();
+            Err(format!(
+                "multiple sessions found ({n}): {}\nhint: disconnect stale sessions first",
+                names.join(", ")
+            ))
+        }
+    }
 }
 
 /// Write a length-prefixed protobuf frame.
@@ -84,7 +111,7 @@ async fn read_frame<R: AsyncReadExt + Unpin, M: Message + Default>(
 
 /// Send an IPC request to the daemon and return the response.
 async fn send_request(req: &IpcRequest) -> Result<IpcResponse, String> {
-    let path = socket_path();
+    let path = discover_socket()?;
     let mut stream = UnixStream::connect(&path)
         .await
         .map_err(|e| match e.kind() {

@@ -14,3 +14,6 @@
 # Environment
 .env
 .env.*
+
+# Session sockets
+.airc-*.sock
