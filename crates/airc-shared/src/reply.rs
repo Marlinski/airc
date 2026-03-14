@@ -33,6 +33,19 @@ pub const RPL_LUSERCHANNELS: u16 = 254;
 pub const RPL_LUSERME: u16 = 255;
 
 // ===========================================================================
+// AWAY / ISON / INVITE (301, 303, 305–306, 341)
+// ===========================================================================
+
+/// `301` — Away message (returned when messaging an away user, or in WHOIS).
+pub const RPL_AWAY: u16 = 301;
+/// `303` — ISON reply (space-separated list of online nicks).
+pub const RPL_ISON: u16 = 303;
+/// `305` — You are no longer marked as being away.
+pub const RPL_UNAWAY: u16 = 305;
+/// `306` — You have been marked as being away.
+pub const RPL_NOWAWAY: u16 = 306;
+
+// ===========================================================================
 // WHO / WHOIS (311–319, 352, 315)
 // ===========================================================================
 
@@ -101,6 +114,13 @@ pub const RPL_ENDOFMOTD: u16 = 376;
 pub const RPL_CHANNELMODEIS: u16 = 324;
 
 // ===========================================================================
+// INVITE (341)
+// ===========================================================================
+
+/// `341` — Returned to the inviter to confirm the invitation was sent.
+pub const RPL_INVITING: u16 = 341;
+
+// ===========================================================================
 // Error replies (401–482)
 // ===========================================================================
 
@@ -124,12 +144,18 @@ pub const ERR_NICKNAMEINUSE: u16 = 433;
 pub const ERR_USERNOTINCHANNEL: u16 = 441;
 /// `442` — You're not on that channel.
 pub const ERR_NOTONCHANNEL: u16 = 442;
+/// `443` — User is already on channel (INVITE).
+pub const ERR_USERONCHANNEL: u16 = 443;
 /// `451` — You have not registered.
 pub const ERR_NOTREGISTERED: u16 = 451;
 /// `461` — Not enough parameters.
 pub const ERR_NEEDMOREPARAMS: u16 = 461;
 /// `462` — Already registered.
 pub const ERR_ALREADYREGISTERED: u16 = 462;
+/// `471` — Cannot join channel (+l) — channel is full.
+pub const ERR_CHANNELISFULL: u16 = 471;
+/// `473` — Cannot join channel (+i) — invite only.
+pub const ERR_INVITEONLYCHAN: u16 = 473;
 /// `474` — Cannot join channel (banned).
 pub const ERR_BANNEDFROMCHAN: u16 = 474;
 /// `475` — Cannot join channel (bad key).
@@ -169,6 +195,10 @@ pub fn reply_name(code: u16) -> &'static str {
         255 => "RPL_LUSERME",
 
         // WHO/WHOIS
+        301 => "RPL_AWAY",
+        303 => "RPL_ISON",
+        305 => "RPL_UNAWAY",
+        306 => "RPL_NOWAWAY",
         311 => "RPL_WHOISUSER",
         312 => "RPL_WHOISSERVER",
         313 => "RPL_WHOISOPERATOR",
@@ -190,6 +220,9 @@ pub fn reply_name(code: u16) -> &'static str {
         // Channel mode
         324 => "RPL_CHANNELMODEIS",
 
+        // INVITE
+        341 => "RPL_INVITING",
+
         // NAMES
         353 => "RPL_NAMREPLY",
         366 => "RPL_ENDOFNAMES",
@@ -210,9 +243,12 @@ pub fn reply_name(code: u16) -> &'static str {
         433 => "ERR_NICKNAMEINUSE",
         441 => "ERR_USERNOTINCHANNEL",
         442 => "ERR_NOTONCHANNEL",
+        443 => "ERR_USERONCHANNEL",
         451 => "ERR_NOTREGISTERED",
         461 => "ERR_NEEDMOREPARAMS",
         462 => "ERR_ALREADYREGISTERED",
+        471 => "ERR_CHANNELISFULL",
+        473 => "ERR_INVITEONLYCHAN",
         474 => "ERR_BANNEDFROMCHAN",
         475 => "ERR_BADCHANNELKEY",
         482 => "ERR_CHANOPRIVSNEEDED",
@@ -240,6 +276,10 @@ mod tests {
         assert_eq!(RPL_LUSERUNKNOWN, 253);
         assert_eq!(RPL_LUSERCHANNELS, 254);
         assert_eq!(RPL_LUSERME, 255);
+        assert_eq!(RPL_AWAY, 301);
+        assert_eq!(RPL_ISON, 303);
+        assert_eq!(RPL_UNAWAY, 305);
+        assert_eq!(RPL_NOWAWAY, 306);
         assert_eq!(RPL_WHOISUSER, 311);
         assert_eq!(RPL_WHOISSERVER, 312);
         assert_eq!(RPL_WHOISOPERATOR, 313);
@@ -253,6 +293,7 @@ mod tests {
         assert_eq!(RPL_TOPIC, 332);
         assert_eq!(RPL_TOPICWHOTIME, 333);
         assert_eq!(RPL_CHANNELMODEIS, 324);
+        assert_eq!(RPL_INVITING, 341);
         assert_eq!(RPL_WHOREPLY, 352);
         assert_eq!(RPL_NAMREPLY, 353);
         assert_eq!(RPL_ENDOFNAMES, 366);
@@ -269,9 +310,12 @@ mod tests {
         assert_eq!(ERR_NICKNAMEINUSE, 433);
         assert_eq!(ERR_USERNOTINCHANNEL, 441);
         assert_eq!(ERR_NOTONCHANNEL, 442);
+        assert_eq!(ERR_USERONCHANNEL, 443);
         assert_eq!(ERR_NOTREGISTERED, 451);
         assert_eq!(ERR_NEEDMOREPARAMS, 461);
         assert_eq!(ERR_ALREADYREGISTERED, 462);
+        assert_eq!(ERR_CHANNELISFULL, 471);
+        assert_eq!(ERR_INVITEONLYCHAN, 473);
         assert_eq!(ERR_BANNEDFROMCHAN, 474);
         assert_eq!(ERR_BADCHANNELKEY, 475);
         assert_eq!(ERR_CHANOPRIVSNEEDED, 482);
@@ -307,6 +351,10 @@ mod tests {
             RPL_LUSERUNKNOWN,
             RPL_LUSERCHANNELS,
             RPL_LUSERME,
+            RPL_AWAY,
+            RPL_ISON,
+            RPL_UNAWAY,
+            RPL_NOWAWAY,
             RPL_WHOISUSER,
             RPL_WHOISSERVER,
             RPL_WHOISOPERATOR,
@@ -320,6 +368,7 @@ mod tests {
             RPL_TOPIC,
             RPL_TOPICWHOTIME,
             RPL_CHANNELMODEIS,
+            RPL_INVITING,
             RPL_WHOREPLY,
             RPL_NAMREPLY,
             RPL_ENDOFNAMES,
@@ -336,9 +385,12 @@ mod tests {
             ERR_NICKNAMEINUSE,
             ERR_USERNOTINCHANNEL,
             ERR_NOTONCHANNEL,
+            ERR_USERONCHANNEL,
             ERR_NOTREGISTERED,
             ERR_NEEDMOREPARAMS,
             ERR_ALREADYREGISTERED,
+            ERR_CHANNELISFULL,
+            ERR_INVITEONLYCHAN,
             ERR_BANNEDFROMCHAN,
             ERR_BADCHANNELKEY,
             ERR_CHANOPRIVSNEEDED,

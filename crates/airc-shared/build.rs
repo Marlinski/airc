@@ -48,6 +48,8 @@ fn main() -> Result<()> {
     config.type_attribute("airc.ipc.FetchPayload", "#[serde(default)]");
     config.type_attribute("airc.ipc.StatusPayload", "#[serde(default)]");
     config.type_attribute("airc.ipc.LogsPayload", "#[serde(default)]");
+    config.type_attribute("airc.ipc.SilenceRequest", "#[serde(default)]");
+    config.type_attribute("airc.ipc.FriendRequest", "#[serde(default)]");
 
     // aircd_ipc.proto messages
     config.type_attribute("airc.aircd_ipc.AircdRequest", "#[serde(default)]");

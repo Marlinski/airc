@@ -83,6 +83,12 @@ pub enum Command {
     List,
     /// `NAMES` — list users visible on a channel.
     Names,
+    /// `ISON` — check if a list of nicks are online.
+    Ison,
+
+    // -- Availability -------------------------------------------------------
+    /// `AWAY` — set or clear away status.
+    Away,
 
     // -- Moderation / social -------------------------------------------------
     /// `SILENCE` — manage the server-side silence list (+nick / -nick / list).
@@ -137,6 +143,8 @@ impl Command {
             "WHOIS" => Command::Whois,
             "LIST" => Command::List,
             "NAMES" => Command::Names,
+            "ISON" => Command::Ison,
+            "AWAY" => Command::Away,
             "SILENCE" => Command::Silence,
             "FRIEND" => Command::Friend,
             "PING" => Command::Ping,
@@ -166,6 +174,8 @@ impl fmt::Display for Command {
             Command::Whois => f.write_str("WHOIS"),
             Command::List => f.write_str("LIST"),
             Command::Names => f.write_str("NAMES"),
+            Command::Ison => f.write_str("ISON"),
+            Command::Away => f.write_str("AWAY"),
             Command::Silence => f.write_str("SILENCE"),
             Command::Friend => f.write_str("FRIEND"),
             Command::Ping => f.write_str("PING"),

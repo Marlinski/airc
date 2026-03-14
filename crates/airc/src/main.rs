@@ -102,6 +102,10 @@ enum Commands {
         /// Nick of the user to silence.
         nick: Option<String>,
 
+        /// Reason for silencing.
+        #[arg(short, long)]
+        reason: Option<String>,
+
         /// List currently silenced nicks.
         #[arg(long, default_value_t = false)]
         list: bool,
@@ -271,7 +275,7 @@ async fn main() {
             let _ = std::fs::remove_file(&sock);
         }
 
-        Commands::Silence { nick, list } => {
+        Commands::Silence { nick, reason, list } => {
             let sock = discover_or_exit(&cli.session);
             if list {
                 send_command(
@@ -280,6 +284,7 @@ async fn main() {
                         nick: String::new(),
                         remove: false,
                         list: true,
+                        reason: None,
                     }),
                 )
                 .await;
@@ -290,6 +295,7 @@ async fn main() {
                         nick,
                         remove: false,
                         list: false,
+                        reason,
                     }),
                 )
                 .await;
@@ -307,6 +313,7 @@ async fn main() {
                     nick,
                     remove: true,
                     list: false,
+                    reason: None,
                 }),
             )
             .await;

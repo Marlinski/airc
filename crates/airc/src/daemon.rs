@@ -538,8 +538,14 @@ async fn execute_request(
                     Err(e) => ipc::response_err(&format!("unsilence failed: {e}")),
                 }
             } else {
-                // Silence — send SILENCE +nick.
-                match client.send_line(&format!("SILENCE +{}", r.nick)).await {
+                // Silence — send SILENCE +nick [:reason].
+                let line = match r.reason {
+                    Some(ref reason) if !reason.is_empty() => {
+                        format!("SILENCE +{} :{}", r.nick, reason)
+                    }
+                    _ => format!("SILENCE +{}", r.nick),
+                };
+                match client.send_line(&line).await {
                     Ok(()) => ipc::response_ok(&format!("silenced {}", r.nick)),
                     Err(e) => ipc::response_err(&format!("silence failed: {e}")),
                 }

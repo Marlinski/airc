@@ -30,6 +30,9 @@ pub async fn handle_command(state: &SharedState, client_id: ClientId, msg: &IrcM
         Command::List => handle_list(state, client_id, msg).await,
         Command::Names => handle_names(state, client_id, msg).await,
         Command::Kick => handle_kick(state, client_id, msg).await,
+        Command::Invite => handle_invite(state, client_id, msg).await,
+        Command::Away => handle_away(state, client_id, msg).await,
+        Command::Ison => handle_ison(state, client_id, msg).await,
         Command::Silence => handle_silence(state, client_id, msg).await,
         Command::Friend => handle_friend(state, client_id, msg).await,
         Command::Motd => handle_motd(state, client_id).await,
@@ -137,6 +140,28 @@ async fn handle_join(state: &SharedState, client_id: ClientId, msg: &IrcMessage)
             }
         }
 
+        // Check invite-only (+i) — user must be on the channel's invite list.
+        if let Some(channel) = state.get_channel(channel_name).await {
+            if channel.modes.invite_only && !channel.is_invited(&client.info.nick) {
+                client.send_numeric(
+                    ERR_INVITEONLYCHAN,
+                    &[channel_name, "Cannot join channel (+i)"],
+                );
+                continue;
+            }
+
+            // Check member limit (+l) — channel must not be at capacity.
+            if let Some(limit) = channel.modes.limit
+                && channel.member_count() >= limit
+            {
+                client.send_numeric(
+                    ERR_CHANNELISFULL,
+                    &[channel_name, "Cannot join channel (+l)"],
+                );
+                continue;
+            }
+        }
+
         // ChanServ access check: look up reputation and verify join is allowed.
         let reputation = state
             .services()
@@ -157,6 +182,11 @@ async fn handle_join(state: &SharedState, client_id: ClientId, msg: &IrcMessage)
         }
 
         let (channel, members) = state.join_channel(client_id, channel_name).await;
+
+        // Clear invite entry now that the user has successfully joined.
+        state
+            .clear_channel_invite(channel_name, &client.info.nick)
+            .await;
 
         // Broadcast JOIN to all members (including the joiner).
         let join_msg = IrcMessage::join(&channel.name).with_prefix(client.prefix());
@@ -295,6 +325,14 @@ async fn route_message(state: &SharedState, client_id: ClientId, msg: &IrcMessag
                     return;
                 }
                 target_client.send_message(&outgoing);
+
+                // If the target is away and this is a PRIVMSG, send RPL_AWAY to sender.
+                if cmd == Command::Privmsg
+                    && let Some(away_msg) = state.get_away_message(target_client.id).await
+                {
+                    client.send_numeric(RPL_AWAY, &[&target_client.info.nick, &away_msg]);
+                }
+
                 // Log DM (keyed by recipient nick).
                 match cmd {
                     Command::Notice => state.logger().log_notice(target, &client.info.nick, text),
@@ -713,6 +751,10 @@ async fn handle_whois(state: &SharedState, client_id: ClientId, msg: &IrcMessage
                 RPL_WHOISSERVER,
                 &[&target.info.nick, state.server_name(), "AIRC server"],
             );
+            // RPL_AWAY — if target is away.
+            if let Some(away_msg) = state.get_away_message(target.id).await {
+                client.send_numeric(RPL_AWAY, &[&target.info.nick, &away_msg]);
+            }
             // RPL_WHOISCHANNELS
             let channels = state.channels_for_client(target.id).await;
             if !channels.is_empty() {
@@ -832,6 +874,133 @@ async fn handle_kick(state: &SharedState, client_id: ClientId, msg: &IrcMessage)
 }
 
 // ---------------------------------------------------------------------------
+// INVITE — invite a user to a channel (RFC 2812 §3.2.7)
+// ---------------------------------------------------------------------------
+
+async fn handle_invite(state: &SharedState, client_id: ClientId, msg: &IrcMessage) {
+    let Some(client) = state.get_client(client_id).await else {
+        return;
+    };
+
+    if msg.params.len() < 2 {
+        client.send_numeric(ERR_NEEDMOREPARAMS, &["INVITE", "Not enough parameters"]);
+        return;
+    }
+
+    let target_nick = &msg.params[0];
+    let channel_name = &msg.params[1];
+
+    // Target must exist.
+    let Some(target) = state.find_client_by_nick(target_nick).await else {
+        client.send_numeric(ERR_NOSUCHNICK, &[target_nick, "No such nick/channel"]);
+        return;
+    };
+
+    // If channel exists, validate membership and permissions.
+    if let Some(channel) = state.get_channel(channel_name).await {
+        // Inviter must be on the channel.
+        if !channel.is_member(client_id) {
+            client.send_numeric(
+                ERR_NOTONCHANNEL,
+                &[channel_name, "You're not on that channel"],
+            );
+            return;
+        }
+
+        // Target must not already be on the channel.
+        if channel.is_member(target.id) {
+            client.send_numeric(
+                ERR_USERONCHANNEL,
+                &[target_nick, channel_name, "is already on channel"],
+            );
+            return;
+        }
+
+        // If channel is +i, only operators may invite.
+        if channel.modes.invite_only && !channel.is_operator(client_id) {
+            client.send_numeric(
+                ERR_CHANOPRIVSNEEDED,
+                &[channel_name, "You're not channel operator"],
+            );
+            return;
+        }
+    }
+
+    // Add target to the channel's invite list.
+    state.add_channel_invite(channel_name, target_nick).await;
+
+    // RPL_INVITING to the inviter.
+    client.send_numeric(RPL_INVITING, &[&target.info.nick, channel_name]);
+
+    // Send INVITE message to the invitee.
+    let invite_msg = IrcMessage {
+        prefix: Some(client.prefix()),
+        command: Command::Invite,
+        params: vec![target.info.nick.clone(), channel_name.to_string()],
+    };
+    target.send_message(&invite_msg);
+
+    // If invitee is away, send RPL_AWAY to inviter.
+    if let Some(away_msg) = state.get_away_message(target.id).await {
+        client.send_numeric(RPL_AWAY, &[&target.info.nick, &away_msg]);
+    }
+
+    debug!(
+        client_id = %client_id,
+        target = %target_nick,
+        channel = %channel_name,
+        "invite"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// AWAY — set or clear away status (RFC 2812 §4.1)
+// ---------------------------------------------------------------------------
+
+async fn handle_away(state: &SharedState, client_id: ClientId, msg: &IrcMessage) {
+    let Some(client) = state.get_client(client_id).await else {
+        return;
+    };
+
+    if let Some(away_text) = msg.params.first()
+        && !away_text.is_empty()
+    {
+        // Set away.
+        state.set_away(client_id, away_text.clone()).await;
+        client.send_numeric(RPL_NOWAWAY, &["You have been marked as being away"]);
+        return;
+    }
+
+    // Clear away (no params or empty param).
+    state.clear_away(client_id).await;
+    client.send_numeric(RPL_UNAWAY, &["You are no longer marked as being away"]);
+}
+
+// ---------------------------------------------------------------------------
+// ISON — lightweight presence check (RFC 2812 §4.9)
+// ---------------------------------------------------------------------------
+
+async fn handle_ison(state: &SharedState, client_id: ClientId, msg: &IrcMessage) {
+    let Some(client) = state.get_client(client_id).await else {
+        return;
+    };
+
+    let mut online_nicks = Vec::new();
+    for nick in &msg.params {
+        // Each param may be a single nick (standard) or space-separated
+        // (some clients pack them into the trailing param).
+        for n in nick.split_whitespace() {
+            if state.find_client_by_nick(n).await.is_some() {
+                online_nicks.push(n.to_string());
+            }
+        }
+    }
+
+    let reply = online_nicks.join(" ");
+    client.send_numeric(RPL_ISON, &[&reply]);
+}
+
+// ---------------------------------------------------------------------------
 // SILENCE — server-side message filtering (+nick / -nick / list)
 // ---------------------------------------------------------------------------
 
@@ -840,21 +1009,22 @@ async fn handle_silence(state: &SharedState, client_id: ClientId, msg: &IrcMessa
         return;
     };
 
-    // No params → list currently silenced nicks.
-    let Some(param) = msg.params.first() else {
-        let silenced_ids = state.get_silence_list(client_id).await;
-        if silenced_ids.is_empty() {
+    // No params → list currently silenced nicks (with reasons).
+    if msg.params.is_empty() {
+        let silenced = state.get_silence_list(client_id).await;
+        if silenced.is_empty() {
             let notice = IrcMessage::notice(&client.info.nick, "Your silence list is empty")
                 .with_prefix(state.server_name());
             client.send_message(&notice);
         } else {
-            for tid in &silenced_ids {
+            for (tid, reason) in &silenced {
                 if let Some(target) = state.get_client(*tid).await {
-                    let notice = IrcMessage::notice(
-                        &client.info.nick,
-                        &format!("SILENCE +{}", target.info.nick),
-                    )
-                    .with_prefix(state.server_name());
+                    let line = match reason {
+                        Some(r) => format!("SILENCE +{} :{}", target.info.nick, r),
+                        None => format!("SILENCE +{}", target.info.nick),
+                    };
+                    let notice = IrcMessage::notice(&client.info.nick, &line)
+                        .with_prefix(state.server_name());
                     client.send_message(&notice);
                 }
             }
@@ -863,101 +1033,138 @@ async fn handle_silence(state: &SharedState, client_id: ClientId, msg: &IrcMessa
             client.send_message(&notice);
         }
         return;
+    }
+
+    // Multi-nick support: iterate params as +nick/-nick entries.
+    // A trailing param starting with ':' is parsed by the IRC message parser
+    // as the last element of params — it's the reason for all +nick additions.
+    //
+    // Example: SILENCE +alice +bob -carol :spamming the channel
+    //   params = ["+alice", "+bob", "-carol", "spamming the channel"]
+    //
+    // Detect the reason: the last param is a reason if it doesn't look like
+    // a +nick/-nick entry (i.e. doesn't start with '+' or '-').
+    let (nick_params, reason) = {
+        let last = msg.params.last().unwrap(); // safe: params is non-empty
+        if !last.starts_with('+') && !last.starts_with('-') {
+            // Last param is a trailing reason.
+            let reason = if last.is_empty() {
+                None
+            } else {
+                Some(last.clone())
+            };
+            (&msg.params[..msg.params.len() - 1], reason)
+        } else {
+            (&msg.params[..], None)
+        }
     };
 
-    // Parse +nick or -nick.
-    let (adding, target_nick) = if let Some(nick) = param.strip_prefix('+') {
-        (true, nick)
-    } else if let Some(nick) = param.strip_prefix('-') {
-        (false, nick)
-    } else {
-        // Bare nick treated as +nick (add to silence list).
-        (true, param.as_str())
-    };
-
-    if target_nick.is_empty() {
+    // If all params were consumed as a reason (e.g. "SILENCE :some text"),
+    // there are no nick entries to process.
+    if nick_params.is_empty() {
         client.send_numeric(ERR_NEEDMOREPARAMS, &["SILENCE", "Not enough parameters"]);
         return;
     }
 
-    // Cannot silence yourself.
-    if target_nick.eq_ignore_ascii_case(&client.info.nick) {
-        let notice = IrcMessage::notice(&client.info.nick, "You cannot silence yourself")
-            .with_prefix(state.server_name());
-        client.send_message(&notice);
-        return;
-    }
+    for param in nick_params {
+        let (adding, target_nick) = if let Some(nick) = param.strip_prefix('+') {
+            (true, nick)
+        } else if let Some(nick) = param.strip_prefix('-') {
+            (false, nick)
+        } else {
+            // Bare nick treated as +nick (add to silence list).
+            (true, param.as_str())
+        };
 
-    let Some(target) = state.find_client_by_nick(target_nick).await else {
-        client.send_numeric(ERR_NOSUCHNICK, &[target_nick, "No such nick/channel"]);
-        return;
-    };
+        if target_nick.is_empty() {
+            client.send_numeric(ERR_NEEDMOREPARAMS, &["SILENCE", "Not enough parameters"]);
+            continue;
+        }
 
-    if adding {
-        // SILENCE +nick — add to silence list.
-        state.add_silence(client_id, target.id).await;
+        // Cannot silence yourself.
+        if target_nick.eq_ignore_ascii_case(&client.info.nick) {
+            let notice = IrcMessage::notice(&client.info.nick, "You cannot silence yourself")
+                .with_prefix(state.server_name());
+            client.send_message(&notice);
+            continue;
+        }
 
-        // Reputation hit on the silenced person (-1).
-        state
-            .services()
-            .nickserv
-            .modify_reputation(&target.info.nick, -1)
-            .await;
+        let Some(target) = state.find_client_by_nick(target_nick).await else {
+            client.send_numeric(ERR_NOSUCHNICK, &[target_nick, "No such nick/channel"]);
+            continue;
+        };
 
-        // Notify the silencing client (DM only).
-        let notice = IrcMessage::notice(
-            &client.info.nick,
-            &format!("You are now ignoring {}", target.info.nick),
-        )
-        .with_prefix(state.server_name());
-        client.send_message(&notice);
+        if adding {
+            // SILENCE +nick — add to silence list (with optional reason).
+            state
+                .add_silence(client_id, target.id, reason.clone())
+                .await;
 
-        // Notify the silenced person (DM only — no channel broadcast).
-        let notice = IrcMessage::notice(
-            &target.info.nick,
-            &format!("{} is now ignoring you", client.info.nick),
-        )
-        .with_prefix(state.server_name());
-        target.send_message(&notice);
+            // Reputation hit on the silenced person (-1).
+            state
+                .services()
+                .nickserv
+                .modify_reputation(&target.info.nick, -1)
+                .await;
 
-        debug!(
-            client_id = %client_id,
-            target = %target.info.nick,
-            "silence +nick"
-        );
-    } else {
-        // SILENCE -nick — remove from silence list.
-        if !state.remove_silence(client_id, target.id).await {
+            // Notify the silencing client (DM only).
+            let msg_text = match &reason {
+                Some(r) => format!("You are now ignoring {} ({})", target.info.nick, r),
+                None => format!("You are now ignoring {}", target.info.nick),
+            };
+            let notice =
+                IrcMessage::notice(&client.info.nick, &msg_text).with_prefix(state.server_name());
+            client.send_message(&notice);
+
+            // Notify the silenced person (DM only — no channel broadcast).
+            let msg_text = match &reason {
+                Some(r) => format!("{} is now ignoring you ({})", client.info.nick, r),
+                None => format!("{} is now ignoring you", client.info.nick),
+            };
+            let notice =
+                IrcMessage::notice(&target.info.nick, &msg_text).with_prefix(state.server_name());
+            target.send_message(&notice);
+
+            debug!(
+                client_id = %client_id,
+                target = %target.info.nick,
+                reason = reason.as_deref().unwrap_or(""),
+                "silence +nick"
+            );
+        } else {
+            // SILENCE -nick — remove from silence list.
+            if !state.remove_silence(client_id, target.id).await {
+                let notice = IrcMessage::notice(
+                    &client.info.nick,
+                    &format!("You are not ignoring {}", target.info.nick),
+                )
+                .with_prefix(state.server_name());
+                client.send_message(&notice);
+                continue;
+            }
+
+            // Notify the client (DM only).
             let notice = IrcMessage::notice(
                 &client.info.nick,
-                &format!("You are not ignoring {}", target.info.nick),
+                &format!("You are no longer ignoring {}", target.info.nick),
             )
             .with_prefix(state.server_name());
             client.send_message(&notice);
-            return;
+
+            // Notify the previously silenced person (DM only — no channel broadcast).
+            let notice = IrcMessage::notice(
+                &target.info.nick,
+                &format!("{} is no longer ignoring you", client.info.nick),
+            )
+            .with_prefix(state.server_name());
+            target.send_message(&notice);
+
+            debug!(
+                client_id = %client_id,
+                target = %target.info.nick,
+                "silence -nick"
+            );
         }
-
-        // Notify the client (DM only).
-        let notice = IrcMessage::notice(
-            &client.info.nick,
-            &format!("You are no longer ignoring {}", target.info.nick),
-        )
-        .with_prefix(state.server_name());
-        client.send_message(&notice);
-
-        // Notify the previously silenced person (DM only — no channel broadcast).
-        let notice = IrcMessage::notice(
-            &target.info.nick,
-            &format!("{} is no longer ignoring you", client.info.nick),
-        )
-        .with_prefix(state.server_name());
-        target.send_message(&notice);
-
-        debug!(
-            client_id = %client_id,
-            target = %target.info.nick,
-            "silence -nick"
-        );
     }
 }
 
@@ -971,7 +1178,7 @@ async fn handle_friend(state: &SharedState, client_id: ClientId, msg: &IrcMessag
     };
 
     // No params → list current friends.
-    let Some(param) = msg.params.first() else {
+    if msg.params.is_empty() {
         let friend_ids = state.get_friend_list(client_id).await;
         if friend_ids.is_empty() {
             let notice = IrcMessage::notice(&client.info.nick, "Your friend list is empty")
@@ -993,101 +1200,104 @@ async fn handle_friend(state: &SharedState, client_id: ClientId, msg: &IrcMessag
             client.send_message(&notice);
         }
         return;
-    };
-
-    // Parse +nick or -nick.
-    let (adding, target_nick) = if let Some(nick) = param.strip_prefix('+') {
-        (true, nick)
-    } else if let Some(nick) = param.strip_prefix('-') {
-        (false, nick)
-    } else {
-        // Bare nick treated as +nick (add friend).
-        (true, param.as_str())
-    };
-
-    if target_nick.is_empty() {
-        client.send_numeric(ERR_NEEDMOREPARAMS, &["FRIEND", "Not enough parameters"]);
-        return;
     }
 
-    // Cannot friend yourself.
-    if target_nick.eq_ignore_ascii_case(&client.info.nick) {
-        let notice = IrcMessage::notice(&client.info.nick, "You cannot friend yourself")
-            .with_prefix(state.server_name());
-        client.send_message(&notice);
-        return;
-    }
+    // Multi-nick support: iterate all params as +nick/-nick entries.
+    // Example: FRIEND +alice +bob -carol
+    for param in &msg.params {
+        let (adding, target_nick) = if let Some(nick) = param.strip_prefix('+') {
+            (true, nick)
+        } else if let Some(nick) = param.strip_prefix('-') {
+            (false, nick)
+        } else {
+            // Bare nick treated as +nick (add friend).
+            (true, param.as_str())
+        };
 
-    let Some(target) = state.find_client_by_nick(target_nick).await else {
-        client.send_numeric(ERR_NOSUCHNICK, &[target_nick, "No such nick/channel"]);
-        return;
-    };
+        if target_nick.is_empty() {
+            client.send_numeric(ERR_NEEDMOREPARAMS, &["FRIEND", "Not enough parameters"]);
+            continue;
+        }
 
-    if adding {
-        // FRIEND +nick — add to friend list.
-        state.add_friend(client_id, target.id).await;
+        // Cannot friend yourself.
+        if target_nick.eq_ignore_ascii_case(&client.info.nick) {
+            let notice = IrcMessage::notice(&client.info.nick, "You cannot friend yourself")
+                .with_prefix(state.server_name());
+            client.send_message(&notice);
+            continue;
+        }
 
-        // Reputation boost on the friended person (+1).
-        state
-            .services()
-            .nickserv
-            .modify_reputation(&target.info.nick, 1)
-            .await;
+        let Some(target) = state.find_client_by_nick(target_nick).await else {
+            client.send_numeric(ERR_NOSUCHNICK, &[target_nick, "No such nick/channel"]);
+            continue;
+        };
 
-        // Notify the befriending client (DM only).
-        let notice = IrcMessage::notice(
-            &client.info.nick,
-            &format!("{} is now your friend", target.info.nick),
-        )
-        .with_prefix(state.server_name());
-        client.send_message(&notice);
+        if adding {
+            // FRIEND +nick — add to friend list.
+            state.add_friend(client_id, target.id).await;
 
-        // Notify the friended person (DM only).
-        let notice = IrcMessage::notice(
-            &target.info.nick,
-            &format!("{} added you as a friend", client.info.nick),
-        )
-        .with_prefix(state.server_name());
-        target.send_message(&notice);
+            // Reputation boost on the friended person (+1).
+            state
+                .services()
+                .nickserv
+                .modify_reputation(&target.info.nick, 1)
+                .await;
 
-        debug!(
-            client_id = %client_id,
-            target = %target.info.nick,
-            "friend +nick"
-        );
-    } else {
-        // FRIEND -nick — remove from friend list.
-        if !state.remove_friend(client_id, target.id).await {
+            // Notify the befriending client (DM only).
             let notice = IrcMessage::notice(
                 &client.info.nick,
-                &format!("{} is not in your friend list", target.info.nick),
+                &format!("{} is now your friend", target.info.nick),
             )
             .with_prefix(state.server_name());
             client.send_message(&notice);
-            return;
+
+            // Notify the friended person (DM only).
+            let notice = IrcMessage::notice(
+                &target.info.nick,
+                &format!("{} added you as a friend", client.info.nick),
+            )
+            .with_prefix(state.server_name());
+            target.send_message(&notice);
+
+            debug!(
+                client_id = %client_id,
+                target = %target.info.nick,
+                "friend +nick"
+            );
+        } else {
+            // FRIEND -nick — remove from friend list.
+            if !state.remove_friend(client_id, target.id).await {
+                let notice = IrcMessage::notice(
+                    &client.info.nick,
+                    &format!("{} is not in your friend list", target.info.nick),
+                )
+                .with_prefix(state.server_name());
+                client.send_message(&notice);
+                continue;
+            }
+
+            // Notify the client (DM only).
+            let notice = IrcMessage::notice(
+                &client.info.nick,
+                &format!("{} is no longer your friend", target.info.nick),
+            )
+            .with_prefix(state.server_name());
+            client.send_message(&notice);
+
+            // Notify the removed person (DM only).
+            let notice = IrcMessage::notice(
+                &target.info.nick,
+                &format!("{} removed you as a friend", client.info.nick),
+            )
+            .with_prefix(state.server_name());
+            target.send_message(&notice);
+
+            debug!(
+                client_id = %client_id,
+                target = %target.info.nick,
+                "friend -nick"
+            );
         }
-
-        // Notify the client (DM only).
-        let notice = IrcMessage::notice(
-            &client.info.nick,
-            &format!("{} is no longer your friend", target.info.nick),
-        )
-        .with_prefix(state.server_name());
-        client.send_message(&notice);
-
-        // Notify the removed person (DM only).
-        let notice = IrcMessage::notice(
-            &target.info.nick,
-            &format!("{} removed you as a friend", client.info.nick),
-        )
-        .with_prefix(state.server_name());
-        target.send_message(&notice);
-
-        debug!(
-            client_id = %client_id,
-            target = %target.info.nick,
-            "friend -nick"
-        );
     }
 }
 

@@ -63,6 +63,9 @@ pub struct Channel {
     pub operators: HashSet<ClientId>,
     /// Channel mode flags.
     pub modes: ChannelModes,
+    /// Nicks that have been invited to this channel (for `+i` enforcement).
+    /// Stored as lowercase nicks so lookup is case-insensitive.
+    pub invited: HashSet<String>,
 }
 
 impl Channel {
@@ -78,6 +81,7 @@ impl Channel {
                 topic_locked: true,
                 ..Default::default()
             },
+            invited: HashSet::new(),
         }
     }
 
@@ -115,5 +119,20 @@ impl Channel {
     /// Snapshot of member IDs.
     pub fn member_list(&self) -> Vec<ClientId> {
         self.members.iter().copied().collect()
+    }
+
+    /// Add a nick to the invite list (case-insensitive).
+    pub fn add_invite(&mut self, nick: &str) {
+        self.invited.insert(nick.to_ascii_lowercase());
+    }
+
+    /// Check whether a nick has been invited (case-insensitive).
+    pub fn is_invited(&self, nick: &str) -> bool {
+        self.invited.contains(&nick.to_ascii_lowercase())
+    }
+
+    /// Remove a nick from the invite list after they join (case-insensitive).
+    pub fn clear_invite(&mut self, nick: &str) {
+        self.invited.remove(&nick.to_ascii_lowercase());
     }
 }

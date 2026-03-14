@@ -43,10 +43,12 @@ struct Inner {
     clients: RwLock<HashMap<ClientId, ClientHandle>>,
     channels: RwLock<HashMap<String, Channel>>,
     nick_to_id: RwLock<HashMap<String, ClientId>>,
-    /// Per-client silence lists: key = silencer, value = set of silenced client IDs.
-    silence_lists: RwLock<HashMap<ClientId, HashSet<ClientId>>>,
+    /// Per-client silence lists: key = silencer, value = map of silenced client ID → optional reason.
+    silence_lists: RwLock<HashMap<ClientId, HashMap<ClientId, Option<String>>>>,
     /// Per-client friend lists: key = befriender, value = set of friended client IDs.
     friend_lists: RwLock<HashMap<ClientId, HashSet<ClientId>>>,
+    /// Per-client away messages. Absent = not away.
+    away_messages: RwLock<HashMap<ClientId, String>>,
     next_id: AtomicU64,
     config: ServerConfig,
     services: ServiceRouter,
@@ -75,6 +77,7 @@ impl SharedState {
                 nick_to_id: RwLock::new(HashMap::new()),
                 silence_lists: RwLock::new(HashMap::new()),
                 friend_lists: RwLock::new(HashMap::new()),
+                away_messages: RwLock::new(HashMap::new()),
                 next_id: AtomicU64::new(1),
                 config,
                 services: ServiceRouter::new(),
@@ -148,11 +151,11 @@ impl SharedState {
         }
 
         // Clean up silence lists: remove this client's own list and remove them
-        // from everyone else's silence sets.
+        // from everyone else's silence maps.
         let mut silence = self.inner.silence_lists.write().await;
         silence.remove(&id);
-        for set in silence.values_mut() {
-            set.remove(&id);
+        for map in silence.values_mut() {
+            map.remove(&id);
         }
         drop(silence);
 
@@ -163,6 +166,9 @@ impl SharedState {
             set.remove(&id);
         }
         drop(friends);
+
+        // Clean up away status.
+        self.inner.away_messages.write().await.remove(&id);
 
         handle
     }
@@ -591,23 +597,23 @@ impl SharedState {
 
     // -- Silence management --------------------------------------------------
 
-    /// Add `target` to `silencer`'s silence list.
-    pub async fn add_silence(&self, silencer: ClientId, target: ClientId) {
+    /// Add `target` to `silencer`'s silence list with an optional reason.
+    pub async fn add_silence(&self, silencer: ClientId, target: ClientId, reason: Option<String>) {
         self.inner
             .silence_lists
             .write()
             .await
             .entry(silencer)
             .or_default()
-            .insert(target);
+            .insert(target, reason);
     }
 
     /// Remove `target` from `silencer`'s silence list. Returns `true` if it was present.
     pub async fn remove_silence(&self, silencer: ClientId, target: ClientId) -> bool {
         let mut lists = self.inner.silence_lists.write().await;
-        if let Some(set) = lists.get_mut(&silencer) {
-            let removed = set.remove(&target);
-            if set.is_empty() {
+        if let Some(map) = lists.get_mut(&silencer) {
+            let removed = map.remove(&target).is_some();
+            if map.is_empty() {
                 lists.remove(&silencer);
             }
             removed
@@ -623,11 +629,11 @@ impl SharedState {
             .read()
             .await
             .get(&recipient)
-            .is_some_and(|set| set.contains(&sender))
+            .is_some_and(|map| map.contains_key(&sender))
     }
 
-    /// Get the set of client IDs that `silencer` currently has silenced.
-    pub async fn get_silence_list(&self, silencer: ClientId) -> HashSet<ClientId> {
+    /// Get the map of silenced client IDs → optional reasons for `silencer`.
+    pub async fn get_silence_list(&self, silencer: ClientId) -> HashMap<ClientId, Option<String>> {
         self.inner
             .silence_lists
             .read()
@@ -675,6 +681,54 @@ impl SharedState {
             .unwrap_or_default()
     }
 
+    // -- Away management ----------------------------------------------------
+
+    /// Set a client's away message.
+    pub async fn set_away(&self, id: ClientId, message: String) {
+        self.inner.away_messages.write().await.insert(id, message);
+    }
+
+    /// Clear a client's away status. Returns `true` if they were away.
+    pub async fn clear_away(&self, id: ClientId) -> bool {
+        self.inner.away_messages.write().await.remove(&id).is_some()
+    }
+
+    /// Get a client's away message, if set.
+    pub async fn get_away_message(&self, id: ClientId) -> Option<String> {
+        self.inner.away_messages.read().await.get(&id).cloned()
+    }
+
+    // -- Invite management --------------------------------------------------
+
+    /// Add a nick to a channel's invite list. Returns `true` if the channel exists.
+    pub async fn add_channel_invite(&self, channel_name: &str, nick: &str) -> bool {
+        let key = channel_name.to_ascii_lowercase();
+        let mut channels = self.inner.channels.write().await;
+        if let Some(ch) = channels.get_mut(&key) {
+            ch.add_invite(nick);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Check whether a nick is on a channel's invite list.
+    #[allow(dead_code)] // Available for future direct-query paths.
+    pub async fn is_channel_invited(&self, channel_name: &str, nick: &str) -> bool {
+        let key = channel_name.to_ascii_lowercase();
+        let channels = self.inner.channels.read().await;
+        channels.get(&key).is_some_and(|ch| ch.is_invited(nick))
+    }
+
+    /// Clear a nick from a channel's invite list (after successful join).
+    pub async fn clear_channel_invite(&self, channel_name: &str, nick: &str) {
+        let key = channel_name.to_ascii_lowercase();
+        let mut channels = self.inner.channels.write().await;
+        if let Some(ch) = channels.get_mut(&key) {
+            ch.clear_invite(nick);
+        }
+    }
+
     // -- Shutdown -----------------------------------------------------------
 
     /// Notify all connected clients of server shutdown and remove them from state.
@@ -698,6 +752,7 @@ impl SharedState {
         self.inner.channels.write().await.clear();
         self.inner.silence_lists.write().await.clear();
         self.inner.friend_lists.write().await.clear();
+        self.inner.away_messages.write().await.clear();
     }
 
     // -- HTTP API queries ---------------------------------------------------

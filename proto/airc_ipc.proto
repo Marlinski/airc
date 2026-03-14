@@ -70,6 +70,7 @@ message SilenceRequest {
   string nick   = 1;   // Nick to silence/unsilence (ignored when list=true)
   bool   remove = 2;   // true = unsilence (-nick), false = silence (+nick)
   bool   list   = 3;   // true = list silenced nicks (nick field ignored)
+  optional string reason = 4;   // Optional reason for silencing
 }
 
 message FriendRequest {
