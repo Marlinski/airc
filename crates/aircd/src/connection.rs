@@ -1,10 +1,13 @@
 //! Per-client connection lifecycle — reader, writer, and registration.
 //!
-//! Each TCP connection is managed by a [`Connection`]. It splits the socket
-//! into a reader and writer, handles the IRC registration handshake
+//! Each connection is managed by a [`Connection`]. It reads IRC lines from
+//! a transport-agnostic reader, handles the IRC registration handshake
 //! (NICK + USER → welcome burst), and then dispatches commands to the handler.
+//!
+//! The writer side is always an `mpsc::Sender<String>` — the actual transport
+//! (TCP socket, WebSocket, etc.) drains that channel in its own write loop.
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -35,13 +38,13 @@ impl Connection {
         }
     }
 
-    /// Run the connection to completion. Takes ownership of the TCP stream.
-    pub async fn run(self, stream: TcpStream) {
+    /// Run the connection over a plain TCP stream.
+    pub async fn run_tcp(self, stream: TcpStream) {
         let (reader, writer) = stream.into_split();
         let (tx, rx) = mpsc::channel::<String>(SEND_BUFFER);
 
-        // Spawn the writer task.
-        let writer_handle = tokio::spawn(write_loop(writer, rx));
+        // Spawn the writer task for TCP.
+        let writer_handle = tokio::spawn(tcp_write_loop(writer, rx));
 
         // Run the reader (registration + command dispatch).
         self.read_loop(BufReader::new(reader), tx).await;
@@ -52,12 +55,25 @@ impl Connection {
         info!(client_id = %self.id, "connection closed");
     }
 
-    /// Read lines from the socket, handle registration, then dispatch commands.
-    async fn read_loop(
-        &self,
-        mut reader: BufReader<tokio::net::tcp::OwnedReadHalf>,
+    /// Run the connection over a generic line-based reader.
+    ///
+    /// The caller is responsible for:
+    /// - Providing a buffered reader that yields `\n`-terminated IRC lines.
+    /// - Spawning a writer task that drains `rx` and sends lines to the client
+    ///   (e.g. as WebSocket text frames).
+    ///
+    /// Returns when the reader hits EOF or the client sends QUIT.
+    pub async fn run_generic<R: AsyncBufRead + Unpin + Send + 'static>(
+        self,
+        reader: R,
         tx: mpsc::Sender<String>,
     ) {
+        self.read_loop(reader, tx).await;
+        info!(client_id = %self.id, "connection closed");
+    }
+
+    /// Read lines from a buffered reader, handle registration, then dispatch.
+    async fn read_loop<R: AsyncBufRead + Unpin>(&self, mut reader: R, tx: mpsc::Sender<String>) {
         // --- Registration phase ---
         let client = match self.registration_phase(&mut reader, &tx).await {
             Some(c) => c,
@@ -108,9 +124,9 @@ impl Connection {
 
     /// Handle the registration handshake: wait for NICK + USER, validate,
     /// register, send welcome burst.
-    async fn registration_phase(
+    async fn registration_phase<R: AsyncBufRead + Unpin>(
         &self,
-        reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
+        reader: &mut R,
         tx: &mpsc::Sender<String>,
     ) -> Option<ClientHandle> {
         let mut pending_nick: Option<String> = None;
@@ -262,11 +278,14 @@ fn send_welcome_burst(state: &SharedState, client: &ClientHandle) {
 }
 
 // ---------------------------------------------------------------------------
-// Writer task
+// TCP writer task
 // ---------------------------------------------------------------------------
 
-/// Drains the outgoing channel and writes lines to the socket.
-async fn write_loop(mut writer: tokio::net::tcp::OwnedWriteHalf, mut rx: mpsc::Receiver<String>) {
+/// Drains the outgoing channel and writes lines to a TCP socket.
+async fn tcp_write_loop(
+    mut writer: tokio::net::tcp::OwnedWriteHalf,
+    mut rx: mpsc::Receiver<String>,
+) {
     while let Some(line) = rx.recv().await {
         let mut buf = line.into_bytes();
         buf.extend_from_slice(b"\r\n");

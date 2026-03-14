@@ -26,7 +26,8 @@ rand = "0.8"
 clap = { version = "4", features = ["derive"] }
 prost = "0.13"
 thiserror = "2"
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
+futures-util = "0.3"
 toml = "0.8"
 rmcp = { version = "0.1", features = ["server", "transport-io", "macros"] }
 schemars = "0.8"

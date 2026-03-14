@@ -49,7 +49,7 @@ impl Server {
 
                                 let conn = Connection::new(id, self.state.clone(), hostname);
                                 tokio::spawn(async move {
-                                    conn.run(stream).await;
+                                    conn.run_tcp(stream).await;
                                 });
                             }
                             Err(e) => {

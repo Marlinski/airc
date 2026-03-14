@@ -191,6 +191,7 @@ fn cmd_start(cfg: ServerConfig, foreground: bool) {
             println!("server started (pid {pid})");
             println!("  irc:  {}", cfg.bind_addr);
             println!("  http: 0.0.0.0:{}", cfg.http_port);
+            println!("  ws:   ws://0.0.0.0:{}/ws", cfg.http_port);
             println!("  log:  {}", log_file_path.display());
 
             // Wait briefly and check it's still alive.
