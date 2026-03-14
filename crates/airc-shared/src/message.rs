@@ -84,6 +84,12 @@ pub enum Command {
     /// `NAMES` — list users visible on a channel.
     Names,
 
+    // -- Moderation / social -------------------------------------------------
+    /// `SILENCE` — manage the server-side silence list (+nick / -nick / list).
+    Silence,
+    /// `FRIEND` — manage the server-side friend list (+nick / -nick / list).
+    Friend,
+
     // -- Server -------------------------------------------------------------
     /// `PING` — keepalive ping.
     Ping,
@@ -131,6 +137,8 @@ impl Command {
             "WHOIS" => Command::Whois,
             "LIST" => Command::List,
             "NAMES" => Command::Names,
+            "SILENCE" => Command::Silence,
+            "FRIEND" => Command::Friend,
             "PING" => Command::Ping,
             "PONG" => Command::Pong,
             "MOTD" => Command::Motd,
@@ -158,6 +166,8 @@ impl fmt::Display for Command {
             Command::Whois => f.write_str("WHOIS"),
             Command::List => f.write_str("LIST"),
             Command::Names => f.write_str("NAMES"),
+            Command::Silence => f.write_str("SILENCE"),
+            Command::Friend => f.write_str("FRIEND"),
             Command::Ping => f.write_str("PING"),
             Command::Pong => f.write_str("PONG"),
             Command::Motd => f.write_str("MOTD"),

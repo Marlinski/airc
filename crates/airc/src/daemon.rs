@@ -523,5 +523,49 @@ async fn execute_request(
             let events = read_log_ring(log_ring, last, channel);
             ipc::response_logs(events)
         }
+
+        Command::Silence(r) => {
+            if r.list {
+                // List silenced nicks — send bare SILENCE command.
+                match client.send_line("SILENCE").await {
+                    Ok(()) => ipc::response_ok("silence list requested"),
+                    Err(e) => ipc::response_err(&format!("silence list failed: {e}")),
+                }
+            } else if r.remove {
+                // Unsilence — send SILENCE -nick.
+                match client.send_line(&format!("SILENCE -{}", r.nick)).await {
+                    Ok(()) => ipc::response_ok(&format!("unsilenced {}", r.nick)),
+                    Err(e) => ipc::response_err(&format!("unsilence failed: {e}")),
+                }
+            } else {
+                // Silence — send SILENCE +nick.
+                match client.send_line(&format!("SILENCE +{}", r.nick)).await {
+                    Ok(()) => ipc::response_ok(&format!("silenced {}", r.nick)),
+                    Err(e) => ipc::response_err(&format!("silence failed: {e}")),
+                }
+            }
+        }
+
+        Command::Friend(r) => {
+            if r.list {
+                // List friends — send bare FRIEND command.
+                match client.send_line("FRIEND").await {
+                    Ok(()) => ipc::response_ok("friend list requested"),
+                    Err(e) => ipc::response_err(&format!("friend list failed: {e}")),
+                }
+            } else if r.remove {
+                // Unfriend — send FRIEND -nick.
+                match client.send_line(&format!("FRIEND -{}", r.nick)).await {
+                    Ok(()) => ipc::response_ok(&format!("unfriended {}", r.nick)),
+                    Err(e) => ipc::response_err(&format!("unfriend failed: {e}")),
+                }
+            } else {
+                // Friend — send FRIEND +nick.
+                match client.send_line(&format!("FRIEND +{}", r.nick)).await {
+                    Ok(()) => ipc::response_ok(&format!("friended {}", r.nick)),
+                    Err(e) => ipc::response_err(&format!("friend failed: {e}")),
+                }
+            }
+        }
     }
 }

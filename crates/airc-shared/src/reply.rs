@@ -94,6 +94,13 @@ pub const RPL_MOTDSTART: u16 = 375;
 pub const RPL_ENDOFMOTD: u16 = 376;
 
 // ===========================================================================
+// Channel mode (324)
+// ===========================================================================
+
+/// `324` — Channel mode is.
+pub const RPL_CHANNELMODEIS: u16 = 324;
+
+// ===========================================================================
 // Error replies (401–482)
 // ===========================================================================
 
@@ -125,6 +132,8 @@ pub const ERR_NEEDMOREPARAMS: u16 = 461;
 pub const ERR_ALREADYREGISTERED: u16 = 462;
 /// `474` — Cannot join channel (banned).
 pub const ERR_BANNEDFROMCHAN: u16 = 474;
+/// `475` — Cannot join channel (bad key).
+pub const ERR_BADCHANNELKEY: u16 = 475;
 /// `482` — You're not channel operator.
 pub const ERR_CHANOPRIVSNEEDED: u16 = 482;
 
@@ -178,6 +187,9 @@ pub fn reply_name(code: u16) -> &'static str {
         332 => "RPL_TOPIC",
         333 => "RPL_TOPICWHOTIME",
 
+        // Channel mode
+        324 => "RPL_CHANNELMODEIS",
+
         // NAMES
         353 => "RPL_NAMREPLY",
         366 => "RPL_ENDOFNAMES",
@@ -202,6 +214,7 @@ pub fn reply_name(code: u16) -> &'static str {
         461 => "ERR_NEEDMOREPARAMS",
         462 => "ERR_ALREADYREGISTERED",
         474 => "ERR_BANNEDFROMCHAN",
+        475 => "ERR_BADCHANNELKEY",
         482 => "ERR_CHANOPRIVSNEEDED",
 
         _ => "UNKNOWN",
@@ -239,6 +252,7 @@ mod tests {
         assert_eq!(RPL_NOTOPIC, 331);
         assert_eq!(RPL_TOPIC, 332);
         assert_eq!(RPL_TOPICWHOTIME, 333);
+        assert_eq!(RPL_CHANNELMODEIS, 324);
         assert_eq!(RPL_WHOREPLY, 352);
         assert_eq!(RPL_NAMREPLY, 353);
         assert_eq!(RPL_ENDOFNAMES, 366);
@@ -259,6 +273,7 @@ mod tests {
         assert_eq!(ERR_NEEDMOREPARAMS, 461);
         assert_eq!(ERR_ALREADYREGISTERED, 462);
         assert_eq!(ERR_BANNEDFROMCHAN, 474);
+        assert_eq!(ERR_BADCHANNELKEY, 475);
         assert_eq!(ERR_CHANOPRIVSNEEDED, 482);
     }
 
@@ -304,6 +319,7 @@ mod tests {
             RPL_NOTOPIC,
             RPL_TOPIC,
             RPL_TOPICWHOTIME,
+            RPL_CHANNELMODEIS,
             RPL_WHOREPLY,
             RPL_NAMREPLY,
             RPL_ENDOFNAMES,
@@ -324,6 +340,7 @@ mod tests {
             ERR_NEEDMOREPARAMS,
             ERR_ALREADYREGISTERED,
             ERR_BANNEDFROMCHAN,
+            ERR_BADCHANNELKEY,
             ERR_CHANOPRIVSNEEDED,
         ];
         for code in codes {

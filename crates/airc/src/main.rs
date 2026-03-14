@@ -97,6 +97,38 @@ enum Commands {
     /// Disconnect from the server (stops the daemon).
     Disconnect,
 
+    /// Silence a user (stop receiving their messages).
+    Silence {
+        /// Nick of the user to silence.
+        nick: Option<String>,
+
+        /// List currently silenced nicks.
+        #[arg(long, default_value_t = false)]
+        list: bool,
+    },
+
+    /// Unsilence a user (resume receiving their messages).
+    Unsilence {
+        /// Nick of the user to unsilence.
+        nick: String,
+    },
+
+    /// Add a user as a friend (reputation boost).
+    Friend {
+        /// Nick of the user to friend.
+        nick: Option<String>,
+
+        /// List current friends.
+        #[arg(long, default_value_t = false)]
+        list: bool,
+    },
+
+    /// Remove a user from your friend list.
+    Unfriend {
+        /// Nick of the user to unfriend.
+        nick: String,
+    },
+
     /// Control client-side CSV logging.
     Log {
         #[command(subcommand)]
@@ -237,6 +269,88 @@ async fn main() {
             // The daemon removes the socket file on shutdown, but clean up
             // from our side too in case it didn't get the chance.
             let _ = std::fs::remove_file(&sock);
+        }
+
+        Commands::Silence { nick, list } => {
+            let sock = discover_or_exit(&cli.session);
+            if list {
+                send_command(
+                    &sock,
+                    Command::Silence(ipc::SilenceRequest {
+                        nick: String::new(),
+                        remove: false,
+                        list: true,
+                    }),
+                )
+                .await;
+            } else if let Some(nick) = nick {
+                send_command(
+                    &sock,
+                    Command::Silence(ipc::SilenceRequest {
+                        nick,
+                        remove: false,
+                        list: false,
+                    }),
+                )
+                .await;
+            } else {
+                eprintln!("error: provide a nick to silence, or use --list");
+                std::process::exit(1);
+            }
+        }
+
+        Commands::Unsilence { nick } => {
+            let sock = discover_or_exit(&cli.session);
+            send_command(
+                &sock,
+                Command::Silence(ipc::SilenceRequest {
+                    nick,
+                    remove: true,
+                    list: false,
+                }),
+            )
+            .await;
+        }
+
+        Commands::Friend { nick, list } => {
+            let sock = discover_or_exit(&cli.session);
+            if list {
+                send_command(
+                    &sock,
+                    Command::Friend(ipc::FriendRequest {
+                        nick: String::new(),
+                        remove: false,
+                        list: true,
+                    }),
+                )
+                .await;
+            } else if let Some(nick) = nick {
+                send_command(
+                    &sock,
+                    Command::Friend(ipc::FriendRequest {
+                        nick,
+                        remove: false,
+                        list: false,
+                    }),
+                )
+                .await;
+            } else {
+                eprintln!("error: provide a nick to friend, or use --list");
+                std::process::exit(1);
+            }
+        }
+
+        Commands::Unfriend { nick } => {
+            let sock = discover_or_exit(&cli.session);
+            send_command(
+                &sock,
+                Command::Friend(ipc::FriendRequest {
+                    nick,
+                    remove: true,
+                    list: false,
+                }),
+            )
+            .await;
         }
 
         Commands::Log { action } => {

@@ -27,6 +27,8 @@ message IpcRequest {
     LogStartRequest   log_start  = 7;
     LogStopRequest    log_stop   = 8;
     LogsRequest       logs       = 9;
+    SilenceRequest    silence    = 10;
+    FriendRequest     friend     = 11;
   }
 }
 
@@ -62,6 +64,18 @@ message LogStopRequest {}
 message LogsRequest {
   optional uint32 last    = 1;   // Number of recent events to return (default: 50)
   optional string channel = 2;   // Filter by channel (omit for all)
+}
+
+message SilenceRequest {
+  string nick   = 1;   // Nick to silence/unsilence (ignored when list=true)
+  bool   remove = 2;   // true = unsilence (-nick), false = silence (+nick)
+  bool   list   = 3;   // true = list silenced nicks (nick field ignored)
+}
+
+message FriendRequest {
+  string nick   = 1;   // Nick to friend/unfriend (ignored when list=true)
+  bool   remove = 2;   // true = unfriend (-nick), false = friend (+nick)
+  bool   list   = 3;   // true = list friends (nick field ignored)
 }
 
 // ---------------------------------------------------------------------------

@@ -3,7 +3,7 @@
 //! All mutations flow through [`SharedState`] methods so the interface can be
 //! extracted into a trait later for testing or alternative backends.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -43,6 +43,10 @@ struct Inner {
     clients: RwLock<HashMap<ClientId, ClientHandle>>,
     channels: RwLock<HashMap<String, Channel>>,
     nick_to_id: RwLock<HashMap<String, ClientId>>,
+    /// Per-client silence lists: key = silencer, value = set of silenced client IDs.
+    silence_lists: RwLock<HashMap<ClientId, HashSet<ClientId>>>,
+    /// Per-client friend lists: key = befriender, value = set of friended client IDs.
+    friend_lists: RwLock<HashMap<ClientId, HashSet<ClientId>>>,
     next_id: AtomicU64,
     config: ServerConfig,
     services: ServiceRouter,
@@ -69,6 +73,8 @@ impl SharedState {
                 clients: RwLock::new(HashMap::new()),
                 channels: RwLock::new(HashMap::new()),
                 nick_to_id: RwLock::new(HashMap::new()),
+                silence_lists: RwLock::new(HashMap::new()),
+                friend_lists: RwLock::new(HashMap::new()),
                 next_id: AtomicU64::new(1),
                 config,
                 services: ServiceRouter::new(),
@@ -140,6 +146,24 @@ impl SharedState {
         for name in empty_channels {
             channels.remove(&name);
         }
+
+        // Clean up silence lists: remove this client's own list and remove them
+        // from everyone else's silence sets.
+        let mut silence = self.inner.silence_lists.write().await;
+        silence.remove(&id);
+        for set in silence.values_mut() {
+            set.remove(&id);
+        }
+        drop(silence);
+
+        // Clean up friend lists: same pattern.
+        let mut friends = self.inner.friend_lists.write().await;
+        friends.remove(&id);
+        for set in friends.values_mut() {
+            set.remove(&id);
+        }
+        drop(friends);
+
         handle
     }
 
@@ -565,6 +589,92 @@ impl SharedState {
         tracing::info!("created default channels: #lobby, #capabilities, #marketplace");
     }
 
+    // -- Silence management --------------------------------------------------
+
+    /// Add `target` to `silencer`'s silence list.
+    pub async fn add_silence(&self, silencer: ClientId, target: ClientId) {
+        self.inner
+            .silence_lists
+            .write()
+            .await
+            .entry(silencer)
+            .or_default()
+            .insert(target);
+    }
+
+    /// Remove `target` from `silencer`'s silence list. Returns `true` if it was present.
+    pub async fn remove_silence(&self, silencer: ClientId, target: ClientId) -> bool {
+        let mut lists = self.inner.silence_lists.write().await;
+        if let Some(set) = lists.get_mut(&silencer) {
+            let removed = set.remove(&target);
+            if set.is_empty() {
+                lists.remove(&silencer);
+            }
+            removed
+        } else {
+            false
+        }
+    }
+
+    /// Check whether `recipient` has silenced `sender`.
+    pub async fn is_silenced_by(&self, sender: ClientId, recipient: ClientId) -> bool {
+        self.inner
+            .silence_lists
+            .read()
+            .await
+            .get(&recipient)
+            .is_some_and(|set| set.contains(&sender))
+    }
+
+    /// Get the set of client IDs that `silencer` currently has silenced.
+    pub async fn get_silence_list(&self, silencer: ClientId) -> HashSet<ClientId> {
+        self.inner
+            .silence_lists
+            .read()
+            .await
+            .get(&silencer)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    // -- Friend management ---------------------------------------------------
+
+    /// Add `target` to `befriender`'s friend list.
+    pub async fn add_friend(&self, befriender: ClientId, target: ClientId) {
+        self.inner
+            .friend_lists
+            .write()
+            .await
+            .entry(befriender)
+            .or_default()
+            .insert(target);
+    }
+
+    /// Remove `target` from `befriender`'s friend list. Returns `true` if it was present.
+    pub async fn remove_friend(&self, befriender: ClientId, target: ClientId) -> bool {
+        let mut lists = self.inner.friend_lists.write().await;
+        if let Some(set) = lists.get_mut(&befriender) {
+            let removed = set.remove(&target);
+            if set.is_empty() {
+                lists.remove(&befriender);
+            }
+            removed
+        } else {
+            false
+        }
+    }
+
+    /// Get the set of client IDs that `befriender` currently has as friends.
+    pub async fn get_friend_list(&self, befriender: ClientId) -> HashSet<ClientId> {
+        self.inner
+            .friend_lists
+            .read()
+            .await
+            .get(&befriender)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     // -- Shutdown -----------------------------------------------------------
 
     /// Notify all connected clients of server shutdown and remove them from state.
@@ -586,6 +696,8 @@ impl SharedState {
         self.inner.clients.write().await.clear();
         self.inner.nick_to_id.write().await.clear();
         self.inner.channels.write().await.clear();
+        self.inner.silence_lists.write().await.clear();
+        self.inner.friend_lists.write().await.clear();
     }
 
     // -- HTTP API queries ---------------------------------------------------
