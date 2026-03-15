@@ -247,7 +247,7 @@ impl Connection {
                         let nick_msg =
                             IrcMessage::nick(&handle.info.nick).with_prefix(handle.prefix());
                         self.state.relay_publish(&nick_msg).await;
-                        send_welcome_burst(&self.state, &handle);
+                        send_welcome_burst(&self.state, &handle).await;
                         return Some(handle);
                     }
                     Err(crate::state::NickError::InUse) => {
@@ -280,8 +280,8 @@ impl Connection {
 // Welcome burst
 // ---------------------------------------------------------------------------
 
-/// Send the standard IRC welcome burst: 001–004 + MOTD.
-fn send_welcome_burst(state: &SharedState, client: &ClientHandle) {
+/// Send the standard IRC welcome burst: 001–005 + LUSERS + MOTD.
+async fn send_welcome_burst(state: &SharedState, client: &ClientHandle) {
     let server = state.server_name();
     let nick = &client.info.nick;
 
@@ -297,7 +297,24 @@ fn send_welcome_burst(state: &SharedState, client: &ClientHandle) {
         RPL_CREATED,
         &["This server was created for agents and humans alike"],
     );
-    client.send_numeric(RPL_MYINFO, &[server, "airc-0.1.0", "io", "itkln"]);
+    // RPL_MYINFO: <server> <version> <user_modes> <channel_modes>
+    client.send_numeric(RPL_MYINFO, &[server, "airc-0.1.0", "io", "imnstklv"]);
+
+    // RPL_ISUPPORT (005) — advertise supported features.
+    client.send_numeric(
+        RPL_ISUPPORT,
+        &[
+            "CHANTYPES=#&",
+            "PREFIX=(ov)@+",
+            "CHANMODES=,,kl,imnst",
+            "NETWORK=AIRC",
+            "CASEMAPPING=ascii",
+            "are supported by this server",
+        ],
+    );
+
+    // LUSERS — connection statistics.
+    handler::send_lusers(state, client).await;
 
     handler::send_motd(state, client);
 }

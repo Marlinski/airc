@@ -17,6 +17,10 @@ pub struct ChannelModes {
     pub topic_locked: bool,
     /// `+n` — no external messages (must be a member to send).
     pub no_external: bool,
+    /// `+m` — moderated (only voiced/opped users can speak).
+    pub moderated: bool,
+    /// `+s` — secret (channel hidden from LIST/WHOIS for non-members).
+    pub secret: bool,
     /// `+k` — channel key (password).
     pub key: Option<String>,
     /// `+l` — member limit.
@@ -24,14 +28,20 @@ pub struct ChannelModes {
 }
 
 impl ChannelModes {
-    /// Render the current mode string (e.g. `+int`).
+    /// Render the current mode string (e.g. `+intms`).
     pub fn to_mode_string(&self) -> String {
         let mut s = String::from("+");
         if self.invite_only {
             s.push('i');
         }
+        if self.moderated {
+            s.push('m');
+        }
         if self.no_external {
             s.push('n');
+        }
+        if self.secret {
+            s.push('s');
         }
         if self.topic_locked {
             s.push('t');
@@ -65,27 +75,38 @@ pub struct Channel {
     pub members: HashMap<String, ClientKind>,
     /// Operators: lowercase nicks (works uniformly for local and remote).
     pub operators: HashSet<String>,
+    /// Voiced users: lowercase nicks (can speak in +m channels).
+    pub voiced: HashSet<String>,
     /// Channel mode flags.
     pub modes: ChannelModes,
     /// Nicks that have been invited to this channel (for `+i` enforcement).
     /// Stored as lowercase nicks so lookup is case-insensitive.
     pub invited: HashSet<String>,
+    /// Unix timestamp when the channel was created.
+    pub created_at: u64,
 }
 
 impl Channel {
     /// Create a new, empty channel with default modes (`+nt`).
     pub fn new(name: String) -> Self {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         Self {
             name,
             topic: None,
             members: HashMap::new(),
             operators: HashSet::new(),
+            voiced: HashSet::new(),
             modes: ChannelModes {
                 no_external: true,
                 topic_locked: true,
                 ..Default::default()
             },
             invited: HashSet::new(),
+            created_at,
         }
     }
 
@@ -99,10 +120,11 @@ impl Channel {
         true
     }
 
-    /// Remove a member by nick (also strips operator status). Returns `true` if present.
+    /// Remove a member by nick (also strips operator/voice status). Returns `true` if present.
     pub fn remove_member(&mut self, nick: &str) -> bool {
         let nick_lower = nick.to_ascii_lowercase();
         self.operators.remove(&nick_lower);
+        self.voiced.remove(&nick_lower);
         self.members.remove(&nick_lower).is_some()
     }
 
@@ -116,6 +138,7 @@ impl Channel {
             .map(|(nick, _)| nick.clone());
         if let Some(ref nick) = nick {
             self.operators.remove(nick);
+            self.voiced.remove(nick);
             self.members.remove(nick);
         }
         nick
@@ -137,6 +160,21 @@ impl Channel {
     #[allow(dead_code)] // Used when relay is wired up.
     pub fn is_operator(&self, nick: &str) -> bool {
         self.operators.contains(&nick.to_ascii_lowercase())
+    }
+
+    /// Whether a nick is voiced in this channel.
+    #[allow(dead_code)] // Available for direct queries.
+    pub fn is_voiced(&self, nick: &str) -> bool {
+        self.voiced.contains(&nick.to_ascii_lowercase())
+    }
+
+    /// Whether a nick can speak in this channel (operator, voiced, or channel is not moderated).
+    pub fn can_speak(&self, nick: &str) -> bool {
+        if !self.modes.moderated {
+            return true;
+        }
+        let nick_lower = nick.to_ascii_lowercase();
+        self.operators.contains(&nick_lower) || self.voiced.contains(&nick_lower)
     }
 
     /// Whether a `ClientId` is an operator in this channel.
@@ -186,19 +224,18 @@ impl Channel {
         self.members.keys().cloned().collect()
     }
 
-    /// Snapshot of member nicks with operator prefix (`@`).
+    /// Snapshot of member nicks with status prefix (`@` for ops, `+` for voiced).
     pub fn nicks_with_prefix(&self) -> Vec<String> {
         self.members
             .keys()
             .map(|nick| {
                 let prefix = if self.operators.contains(nick) {
                     "@"
+                } else if self.voiced.contains(nick) {
+                    "+"
                 } else {
                     ""
                 };
-                // Return the nick as stored (lowercase). The caller may want
-                // to resolve the canonical casing from ClientHandle if needed,
-                // but for NAMES replies lowercase is acceptable per RFC.
                 format!("{prefix}{nick}")
             })
             .collect()
@@ -239,6 +276,7 @@ impl Channel {
             .collect();
         for nick in &to_remove {
             self.operators.remove(nick);
+            self.voiced.remove(nick);
             self.members.remove(nick);
         }
         to_remove

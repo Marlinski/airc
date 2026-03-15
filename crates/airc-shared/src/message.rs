@@ -109,6 +109,8 @@ pub enum Command {
     Pong,
     /// `MOTD` — request the Message of the Day.
     Motd,
+    /// `VERSION` — request the server version.
+    Version,
 
     // -- Catch-all ----------------------------------------------------------
     /// A three-digit numeric reply code (e.g. `001`, `433`).
@@ -158,6 +160,7 @@ impl Command {
             "PING" => Command::Ping,
             "PONG" => Command::Pong,
             "MOTD" => Command::Motd,
+            "VERSION" => Command::Version,
             _ => Command::Unknown(s.to_string()),
         }
     }
@@ -191,6 +194,7 @@ impl fmt::Display for Command {
             Command::Ping => f.write_str("PING"),
             Command::Pong => f.write_str("PONG"),
             Command::Motd => f.write_str("MOTD"),
+            Command::Version => f.write_str("VERSION"),
             Command::Numeric(n) => write!(f, "{n:03}"),
             Command::Unknown(s) => f.write_str(s),
         }

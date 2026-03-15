@@ -16,6 +16,8 @@ pub const RPL_YOURHOST: u16 = 2;
 pub const RPL_CREATED: u16 = 3;
 /// `004` — Server name and version info.
 pub const RPL_MYINFO: u16 = 4;
+/// `005` — Server-supported features (ISUPPORT).
+pub const RPL_ISUPPORT: u16 = 5;
 
 // ===========================================================================
 // Luser statistics (251–255)
@@ -31,6 +33,10 @@ pub const RPL_LUSERUNKNOWN: u16 = 253;
 pub const RPL_LUSERCHANNELS: u16 = 254;
 /// `255` — Client/server count for this server.
 pub const RPL_LUSERME: u16 = 255;
+/// `265` — Local user count.
+pub const RPL_LOCALUSERS: u16 = 265;
+/// `266` — Global user count.
+pub const RPL_GLOBALUSERS: u16 = 266;
 
 // ===========================================================================
 // AWAY / ISON / INVITE (301, 303, 305–306, 341)
@@ -119,6 +125,8 @@ pub const RPL_YOUREOPER: u16 = 381;
 
 /// `324` — Channel mode is.
 pub const RPL_CHANNELMODEIS: u16 = 324;
+/// `329` — Channel creation time.
+pub const RPL_CREATIONTIME: u16 = 329;
 
 // ===========================================================================
 // INVITE (341)
@@ -126,6 +134,8 @@ pub const RPL_CHANNELMODEIS: u16 = 324;
 
 /// `341` — Returned to the inviter to confirm the invitation was sent.
 pub const RPL_INVITING: u16 = 341;
+/// `351` — Server version reply.
+pub const RPL_VERSION: u16 = 351;
 
 // ===========================================================================
 // Error replies (401–482)
@@ -173,6 +183,8 @@ pub const ERR_BADCHANNELKEY: u16 = 475;
 pub const ERR_NOPRIVILEGES: u16 = 481;
 /// `482` — You're not channel operator.
 pub const ERR_CHANOPRIVSNEEDED: u16 = 482;
+/// `472` — Unknown mode character.
+pub const ERR_UNKNOWNMODE: u16 = 472;
 /// `491` — No O-lines for your host.
 pub const ERR_NOOPERHOST: u16 = 491;
 
@@ -199,6 +211,7 @@ pub fn reply_name(code: u16) -> &'static str {
         2 => "RPL_YOURHOST",
         3 => "RPL_CREATED",
         4 => "RPL_MYINFO",
+        5 => "RPL_ISUPPORT",
 
         // Luser
         251 => "RPL_LUSERCLIENT",
@@ -206,6 +219,8 @@ pub fn reply_name(code: u16) -> &'static str {
         253 => "RPL_LUSERUNKNOWN",
         254 => "RPL_LUSERCHANNELS",
         255 => "RPL_LUSERME",
+        265 => "RPL_LOCALUSERS",
+        266 => "RPL_GLOBALUSERS",
 
         // WHO/WHOIS
         301 => "RPL_AWAY",
@@ -232,9 +247,11 @@ pub fn reply_name(code: u16) -> &'static str {
 
         // Channel mode
         324 => "RPL_CHANNELMODEIS",
+        329 => "RPL_CREATIONTIME",
 
         // INVITE
         341 => "RPL_INVITING",
+        351 => "RPL_VERSION",
 
         // NAMES
         353 => "RPL_NAMREPLY",
@@ -265,6 +282,7 @@ pub fn reply_name(code: u16) -> &'static str {
         462 => "ERR_ALREADYREGISTERED",
         464 => "ERR_PASSWDMISMATCH",
         471 => "ERR_CHANNELISFULL",
+        472 => "ERR_UNKNOWNMODE",
         473 => "ERR_INVITEONLYCHAN",
         474 => "ERR_BANNEDFROMCHAN",
         475 => "ERR_BADCHANNELKEY",
@@ -290,11 +308,14 @@ mod tests {
         assert_eq!(RPL_YOURHOST, 2);
         assert_eq!(RPL_CREATED, 3);
         assert_eq!(RPL_MYINFO, 4);
+        assert_eq!(RPL_ISUPPORT, 5);
         assert_eq!(RPL_LUSERCLIENT, 251);
         assert_eq!(RPL_LUSEROP, 252);
         assert_eq!(RPL_LUSERUNKNOWN, 253);
         assert_eq!(RPL_LUSERCHANNELS, 254);
         assert_eq!(RPL_LUSERME, 255);
+        assert_eq!(RPL_LOCALUSERS, 265);
+        assert_eq!(RPL_GLOBALUSERS, 266);
         assert_eq!(RPL_AWAY, 301);
         assert_eq!(RPL_ISON, 303);
         assert_eq!(RPL_UNAWAY, 305);
@@ -312,7 +333,9 @@ mod tests {
         assert_eq!(RPL_TOPIC, 332);
         assert_eq!(RPL_TOPICWHOTIME, 333);
         assert_eq!(RPL_CHANNELMODEIS, 324);
+        assert_eq!(RPL_CREATIONTIME, 329);
         assert_eq!(RPL_INVITING, 341);
+        assert_eq!(RPL_VERSION, 351);
         assert_eq!(RPL_WHOREPLY, 352);
         assert_eq!(RPL_NAMREPLY, 353);
         assert_eq!(RPL_ENDOFNAMES, 366);
@@ -335,6 +358,7 @@ mod tests {
         assert_eq!(ERR_ALREADYREGISTERED, 462);
         assert_eq!(ERR_PASSWDMISMATCH, 464);
         assert_eq!(ERR_CHANNELISFULL, 471);
+        assert_eq!(ERR_UNKNOWNMODE, 472);
         assert_eq!(ERR_INVITEONLYCHAN, 473);
         assert_eq!(ERR_BANNEDFROMCHAN, 474);
         assert_eq!(ERR_BADCHANNELKEY, 475);
@@ -369,11 +393,14 @@ mod tests {
             RPL_YOURHOST,
             RPL_CREATED,
             RPL_MYINFO,
+            RPL_ISUPPORT,
             RPL_LUSERCLIENT,
             RPL_LUSEROP,
             RPL_LUSERUNKNOWN,
             RPL_LUSERCHANNELS,
             RPL_LUSERME,
+            RPL_LOCALUSERS,
+            RPL_GLOBALUSERS,
             RPL_AWAY,
             RPL_ISON,
             RPL_UNAWAY,
@@ -391,7 +418,9 @@ mod tests {
             RPL_TOPIC,
             RPL_TOPICWHOTIME,
             RPL_CHANNELMODEIS,
+            RPL_CREATIONTIME,
             RPL_INVITING,
+            RPL_VERSION,
             RPL_WHOREPLY,
             RPL_NAMREPLY,
             RPL_ENDOFNAMES,
@@ -415,6 +444,7 @@ mod tests {
             ERR_ALREADYREGISTERED,
             ERR_PASSWDMISMATCH,
             ERR_CHANNELISFULL,
+            ERR_UNKNOWNMODE,
             ERR_INVITEONLYCHAN,
             ERR_BANNEDFROMCHAN,
             ERR_BADCHANNELKEY,

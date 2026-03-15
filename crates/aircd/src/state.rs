@@ -402,6 +402,7 @@ impl SharedState {
     }
 
     /// List all channel names with their member counts and topics.
+    #[allow(dead_code)] // Superseded by list_channels_for() but kept for API/tests.
     pub async fn list_channels(&self) -> Vec<(String, usize, Option<String>)> {
         let channels = self.inner.channels.read().await;
         channels
@@ -591,6 +592,8 @@ impl SharedState {
                 'i' => ch.modes.invite_only = set,
                 't' => ch.modes.topic_locked = set,
                 'n' => ch.modes.no_external = set,
+                'm' => ch.modes.moderated = set,
+                's' => ch.modes.secret = set,
                 'k' => {
                     ch.modes.key = if set {
                         param.map(|s| s.to_string())
@@ -618,6 +621,177 @@ impl SharedState {
         let key = channel_name.to_ascii_lowercase();
         let channels = self.inner.channels.read().await;
         channels.get(&key).map(|ch| ch.modes.to_mode_string())
+    }
+
+    /// Get the creation timestamp for a channel.
+    pub async fn channel_created_at(&self, channel_name: &str) -> Option<u64> {
+        let key = channel_name.to_ascii_lowercase();
+        let channels = self.inner.channels.read().await;
+        channels.get(&key).map(|ch| ch.created_at)
+    }
+
+    /// Grant or revoke voice (+v) for a nick in a channel.
+    pub async fn set_channel_voice(
+        &self,
+        channel_name: &str,
+        target_nick: &str,
+        grant: bool,
+    ) -> bool {
+        let key = channel_name.to_ascii_lowercase();
+        let nick_lower = target_nick.to_ascii_lowercase();
+        let mut channels = self.inner.channels.write().await;
+        if let Some(ch) = channels.get_mut(&key) {
+            if !ch.is_member_nick(target_nick) {
+                return false;
+            }
+            if grant {
+                ch.voiced.insert(nick_lower);
+            } else {
+                ch.voiced.remove(&nick_lower);
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Check whether a nick can speak in a channel (+m enforcement).
+    /// Returns `true` if the channel is not moderated, or if the nick is op/voiced.
+    pub async fn can_speak_in_channel(&self, channel_name: &str, nick: &str) -> bool {
+        let key = channel_name.to_ascii_lowercase();
+        let channels = self.inner.channels.read().await;
+        match channels.get(&key) {
+            Some(ch) => ch.can_speak(nick),
+            None => true,
+        }
+    }
+
+    /// Check whether a nick is a member of a channel.
+    pub async fn is_channel_member(&self, channel_name: &str, nick: &str) -> bool {
+        let key = channel_name.to_ascii_lowercase();
+        let channels = self.inner.channels.read().await;
+        channels.get(&key).is_some_and(|ch| ch.is_member_nick(nick))
+    }
+
+    /// Check whether a channel has +n (no external messages) mode set.
+    pub async fn channel_is_no_external(&self, channel_name: &str) -> bool {
+        let key = channel_name.to_ascii_lowercase();
+        let channels = self.inner.channels.read().await;
+        channels.get(&key).is_some_and(|ch| ch.modes.no_external)
+    }
+
+    /// Check whether a channel is secret (+s).
+    pub async fn channel_is_secret(&self, channel_name: &str) -> bool {
+        let key = channel_name.to_ascii_lowercase();
+        let channels = self.inner.channels.read().await;
+        channels.get(&key).is_some_and(|ch| ch.modes.secret)
+    }
+
+    /// Get the count of local clients.
+    pub async fn local_client_count(&self) -> usize {
+        self.inner.clients.read().await.len()
+    }
+
+    /// Get the count of active channels.
+    pub async fn channel_count(&self) -> usize {
+        self.inner.channels.read().await.len()
+    }
+
+    /// Get the count of IRC operators online.
+    pub async fn oper_count(&self) -> usize {
+        self.inner
+            .clients
+            .read()
+            .await
+            .values()
+            .filter(|h| h.info.is_oper())
+            .count()
+    }
+
+    /// List channels, filtering out secret (+s) channels for non-members.
+    pub async fn list_channels_for(
+        &self,
+        client_id: ClientId,
+    ) -> Vec<(String, usize, Option<String>)> {
+        let channels = self.inner.channels.read().await;
+        channels
+            .values()
+            .filter(|ch| {
+                // Show if not secret, or if the client is a member.
+                !ch.modes.secret || ch.is_member_id(client_id)
+            })
+            .map(|ch| {
+                let topic_text = ch.topic.as_ref().map(|(t, _, _)| t.clone());
+                (ch.name.clone(), ch.member_count(), topic_text)
+            })
+            .collect()
+    }
+
+    /// Get channels for a client as seen by another client (for WHOIS).
+    /// Filters out secret channels where the querier is not a member.
+    pub async fn channels_for_client_seen_by(
+        &self,
+        target_id: ClientId,
+        querier_id: ClientId,
+    ) -> Vec<String> {
+        let channels = self.inner.channels.read().await;
+        channels
+            .iter()
+            .filter_map(|(_, ch)| {
+                if ch.is_member_id(target_id) && (!ch.modes.secret || ch.is_member_id(querier_id)) {
+                    Some(ch.name.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Part a client from ALL channels (for JOIN 0).
+    /// Returns a list of (channel_name, remaining_local_members) for broadcasting PART.
+    pub async fn part_all_channels(&self, id: ClientId) -> Vec<(String, Vec<ClientHandle>)> {
+        let mut channels = self.inner.channels.write().await;
+
+        // Collect channel names where this client is a member.
+        let member_channels: Vec<String> = channels
+            .iter()
+            .filter_map(|(key, ch)| {
+                if ch.is_member_id(id) {
+                    Some(key.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let mut results = Vec::new();
+        for key in &member_channels {
+            if let Some(channel) = channels.get_mut(key) {
+                let name = channel.name.clone();
+                channel.remove_member_by_id(id);
+                let remaining_ids = channel.local_client_ids();
+                let is_empty = channel.members.is_empty();
+                if is_empty {
+                    channels.remove(key);
+                }
+                results.push((name, remaining_ids));
+            }
+        }
+
+        drop(channels);
+
+        // Resolve ClientHandles.
+        let clients = self.inner.clients.read().await;
+        results
+            .into_iter()
+            .map(|(name, ids)| {
+                let handles: Vec<ClientHandle> = ids
+                    .iter()
+                    .filter_map(|cid| clients.get(cid).cloned())
+                    .collect();
+                (name, handles)
+            })
+            .collect()
     }
 
     /// Pre-create default channels so they exist before anyone joins.

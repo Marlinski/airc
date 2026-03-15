@@ -41,6 +41,10 @@ pub async fn handle_command(state: &SharedState, client_id: ClientId, msg: &IrcM
             }
         }
         Command::Motd => handle_motd(state, client_id).await,
+        Command::Version => handle_version(state, client_id).await,
+        Command::Unknown(cmd_str) if cmd_str.eq_ignore_ascii_case("LUSERS") => {
+            handle_lusers(state, client_id).await
+        }
         Command::Oper => handle_oper(state, client_id, msg).await,
         Command::Kill => handle_kill(state, client_id, msg).await,
         Command::User | Command::Pass => {
@@ -119,6 +123,27 @@ async fn handle_join(state: &SharedState, client_id: ClientId, msg: &IrcMessage)
         client.send_numeric(ERR_NEEDMOREPARAMS, &["JOIN", "Not enough parameters"]);
         return;
     };
+
+    // JOIN 0 — part all channels (RFC 2812 §3.2.1).
+    if channels_param == "0" {
+        let parted = state.part_all_channels(client_id).await;
+        for (channel_name, remaining) in parted {
+            let part_msg = IrcMessage::part(&channel_name, None).with_prefix(client.prefix());
+            let line: Arc<str> = part_msg.serialize().into();
+            // Notify the parting client.
+            client.send_line(&line);
+            // Notify remaining members.
+            for member in &remaining {
+                member.send_line(&line);
+            }
+            // Relay PART to remote nodes.
+            state.relay_publish(&part_msg).await;
+            state
+                .logger()
+                .log_part(&channel_name, &client.info.nick, "");
+        }
+        return;
+    }
 
     // RFC 2812: JOIN #chan1,#chan2 key1,key2
     let keys: Vec<&str> = msg
@@ -289,6 +314,24 @@ async fn route_message(state: &SharedState, client_id: ClientId, msg: &IrcMessag
     .with_prefix(client.prefix());
 
     if is_channel_name(target) {
+        // +n enforcement: non-members cannot send to channels with no-external mode.
+        if state.channel_is_no_external(target).await
+            && !state.is_channel_member(target, &client.info.nick).await
+        {
+            if cmd == Command::Privmsg {
+                client.send_numeric(ERR_CANNOTSENDTOCHAN, &[target, "Cannot send to channel"]);
+            }
+            return;
+        }
+
+        // +m enforcement: only voiced/opped users can speak in moderated channels.
+        if !state.can_speak_in_channel(target, &client.info.nick).await {
+            if cmd == Command::Privmsg {
+                client.send_numeric(ERR_CANNOTSENDTOCHAN, &[target, "Cannot send to channel"]);
+            }
+            return;
+        }
+
         // Channel message — fan out to all members except sender.
         match state.channel_members_except(target, client_id).await {
             Some(members) => {
@@ -542,6 +585,10 @@ async fn handle_channel_mode(
         match state.channel_mode_string(channel_name).await {
             Some(mode_str) => {
                 client.send_numeric(RPL_CHANNELMODEIS, &[channel_name, &mode_str]);
+                // RPL_CREATIONTIME (329) — send channel creation timestamp.
+                if let Some(created_at) = state.channel_created_at(channel_name).await {
+                    client.send_numeric(RPL_CREATIONTIME, &[channel_name, &created_at.to_string()]);
+                }
             }
             None => {
                 client.send_numeric(ERR_NOSUCHCHANNEL, &[channel_name, "No such channel"]);
@@ -575,6 +622,15 @@ async fn handle_channel_mode(
                 }
 
                 if let Some(_target) = state.find_client_by_nick(target_nick).await {
+                    // Check target is on the channel.
+                    if !state.is_channel_member(channel_name, target_nick).await {
+                        client.send_numeric(
+                            ERR_USERNOTINCHANNEL,
+                            &[target_nick, channel_name, "They aren't on that channel"],
+                        );
+                        return;
+                    }
+
                     state
                         .set_channel_operator(channel_name, target_nick, setting)
                         .await;
@@ -603,7 +659,7 @@ async fn handle_channel_mode(
                     client.send_numeric(ERR_NOSUCHNICK, &[target_nick, "No such nick"]);
                 }
             }
-            'i' | 't' | 'n' => {
+            'i' | 't' | 'n' | 'm' | 's' => {
                 if !state.is_channel_operator(channel_name, client_id).await {
                     client.send_numeric(
                         ERR_CHANOPRIVSNEEDED,
@@ -624,6 +680,56 @@ async fn handle_channel_mode(
                     prefix: Some(client.prefix()),
                     command: Command::Mode,
                     params: vec![channel_name.to_string(), flag],
+                };
+                if let Some(members) = state.channel_members(channel_name).await {
+                    let line: Arc<str> = mode_msg.serialize().into();
+                    for member in &members {
+                        member.send_line(&line);
+                    }
+                }
+
+                // Relay MODE change to remote nodes.
+                state.relay_publish(&mode_msg).await;
+            }
+            'v' => {
+                // Voice/devoice a user.
+                let Some(target_nick) = msg.params.get(param_idx) else {
+                    client.send_numeric(ERR_NEEDMOREPARAMS, &["MODE", "Not enough parameters"]);
+                    return;
+                };
+                param_idx += 1;
+
+                if !state.is_channel_operator(channel_name, client_id).await {
+                    client.send_numeric(
+                        ERR_CHANOPRIVSNEEDED,
+                        &[channel_name, "You're not channel operator"],
+                    );
+                    return;
+                }
+
+                // Check target is on the channel.
+                if !state.is_channel_member(channel_name, target_nick).await {
+                    client.send_numeric(
+                        ERR_USERNOTINCHANNEL,
+                        &[target_nick, channel_name, "They aren't on that channel"],
+                    );
+                    return;
+                }
+
+                state
+                    .set_channel_voice(channel_name, target_nick, setting)
+                    .await;
+
+                // Broadcast mode change.
+                let mode_change = if setting {
+                    format!("+v {target_nick}")
+                } else {
+                    format!("-v {target_nick}")
+                };
+                let mode_msg = IrcMessage {
+                    prefix: Some(client.prefix()),
+                    command: Command::Mode,
+                    params: vec![channel_name.to_string(), mode_change],
                 };
                 if let Some(members) = state.channel_members(channel_name).await {
                     let line: Arc<str> = mode_msg.serialize().into();
@@ -718,7 +824,10 @@ async fn handle_channel_mode(
                 // Relay MODE change to remote nodes.
                 state.relay_publish(&mode_msg).await;
             }
-            _ => {}
+            unknown => {
+                let mode_str = unknown.to_string();
+                client.send_numeric(ERR_UNKNOWNMODE, &[&mode_str, "is unknown mode char to me"]);
+            }
         }
     }
 }
@@ -735,8 +844,25 @@ async fn handle_who(state: &SharedState, client_id: ClientId, msg: &IrcMessage) 
     let mask = msg.params.first().map(|s| s.as_str()).unwrap_or("*");
 
     if is_channel_name(mask) {
-        if let Some(members) = state.channel_members(mask).await {
+        if let Some(channel) = state.get_channel(mask).await {
+            let members = state.channel_members(mask).await.unwrap_or_default();
             for member in &members {
+                // H = here, G = gone (away).
+                let away_flag = if state.get_away_message(member.id).await.is_some() {
+                    "G"
+                } else {
+                    "H"
+                };
+                // Membership prefix: @ for op, + for voiced.
+                let nick_lower = member.info.nick.to_ascii_lowercase();
+                let prefix = if channel.operators.contains(&nick_lower) {
+                    "@"
+                } else if channel.voiced.contains(&nick_lower) {
+                    "+"
+                } else {
+                    ""
+                };
+                let flags = format!("{away_flag}{prefix}");
                 // RPL_WHOREPLY: <channel> <user> <host> <server> <nick> <H|G>[*][@|+] :<hopcount> <realname>
                 client.send_numeric(
                     RPL_WHOREPLY,
@@ -746,7 +872,7 @@ async fn handle_who(state: &SharedState, client_id: ClientId, msg: &IrcMessage) 
                         &member.info.hostname,
                         state.server_name(),
                         &member.info.nick,
-                        "H",
+                        &flags,
                         &format!("0 {}", member.info.realname),
                     ],
                 );
@@ -802,8 +928,10 @@ async fn handle_whois(state: &SharedState, client_id: ClientId, msg: &IrcMessage
             if let Some(away_msg) = state.get_away_message(target.id).await {
                 client.send_numeric(RPL_AWAY, &[&target.info.nick, &away_msg]);
             }
-            // RPL_WHOISCHANNELS
-            let channels = state.channels_for_client(target.id).await;
+            // RPL_WHOISCHANNELS — filtered by +s visibility.
+            let channels = state
+                .channels_for_client_seen_by(target.id, client_id)
+                .await;
             if !channels.is_empty() {
                 let chan_list = channels.join(" ");
                 client.send_numeric(RPL_WHOISCHANNELS, &[&target.info.nick, &chan_list]);
@@ -830,7 +958,7 @@ async fn handle_list(state: &SharedState, client_id: ClientId, _msg: &IrcMessage
         return;
     };
 
-    let channels = state.list_channels().await;
+    let channels = state.list_channels_for(client_id).await;
     for (name, count, topic) in &channels {
         let count_str = count.to_string();
         let topic_str = topic.as_deref().unwrap_or("");
@@ -886,6 +1014,15 @@ async fn handle_kick(state: &SharedState, client_id: ClientId, msg: &IrcMessage)
         client.send_numeric(ERR_NOSUCHNICK, &[target_nick, "No such nick"]);
         return;
     };
+
+    // Check target is actually on the channel.
+    if !state.is_channel_member(channel_name, target_nick).await {
+        client.send_numeric(
+            ERR_USERNOTINCHANNEL,
+            &[target_nick, channel_name, "They aren't on that channel"],
+        );
+        return;
+    }
 
     // Broadcast KICK before removing.
     let kick_msg = IrcMessage {
@@ -1192,6 +1329,78 @@ async fn handle_kill(state: &SharedState, client_id: ClientId, msg: &IrcMessage)
 }
 
 // ---------------------------------------------------------------------------
+// VERSION — server version info (RFC 2812 §3.4.3)
+// ---------------------------------------------------------------------------
+
+async fn handle_version(state: &SharedState, client_id: ClientId) {
+    let Some(client) = state.get_client(client_id).await else {
+        return;
+    };
+    // RPL_VERSION: <version> <server> :<comments>
+    client.send_numeric(
+        RPL_VERSION,
+        &["airc-0.1.0", state.server_name(), "AIRC IRC server"],
+    );
+}
+
+// ---------------------------------------------------------------------------
+// LUSERS — connection statistics (RFC 2812 §3.4.2)
+// ---------------------------------------------------------------------------
+
+async fn handle_lusers(state: &SharedState, client_id: ClientId) {
+    let Some(client) = state.get_client(client_id).await else {
+        return;
+    };
+    send_lusers(state, &client).await;
+}
+
+/// Send LUSERS numerics (251-255, 265-266) to a client.
+pub async fn send_lusers(state: &SharedState, client: &crate::client::ClientHandle) {
+    let user_count = state.local_client_count().await;
+    let channel_count = state.channel_count().await;
+    let oper_count = state.oper_count().await;
+
+    // 251 RPL_LUSERCLIENT: "There are <n> users and 0 services on 1 servers"
+    client.send_numeric(
+        RPL_LUSERCLIENT,
+        &[&format!(
+            "There are {user_count} users and 0 services on 1 servers"
+        )],
+    );
+    // 252 RPL_LUSEROP: <count> :operator(s) online
+    client.send_numeric(
+        RPL_LUSEROP,
+        &[&oper_count.to_string(), "operator(s) online"],
+    );
+    // 253 RPL_LUSERUNKNOWN: <count> :unknown connection(s)
+    client.send_numeric(RPL_LUSERUNKNOWN, &["0", "unknown connection(s)"]);
+    // 254 RPL_LUSERCHANNELS: <count> :channels formed
+    client.send_numeric(
+        RPL_LUSERCHANNELS,
+        &[&channel_count.to_string(), "channels formed"],
+    );
+    // 255 RPL_LUSERME: "I have <n> clients and 1 servers"
+    client.send_numeric(
+        RPL_LUSERME,
+        &[&format!("I have {user_count} clients and 1 servers")],
+    );
+    // 265 RPL_LOCALUSERS
+    client.send_numeric(
+        RPL_LOCALUSERS,
+        &[&format!(
+            "Current local users: {user_count}, max: {user_count}"
+        )],
+    );
+    // 266 RPL_GLOBALUSERS
+    client.send_numeric(
+        RPL_GLOBALUSERS,
+        &[&format!(
+            "Current global users: {user_count}, max: {user_count}"
+        )],
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
 
@@ -1228,8 +1437,14 @@ async fn send_names_to_client(
 ) {
     if let Some(nicks) = state.channel_nicks_with_prefix(channel_name).await {
         let names_str = nicks.join(" ");
-        // RPL_NAMREPLY: = <channel> :<nicks>
-        client.send_numeric(RPL_NAMREPLY, &["=", channel_name, &names_str]);
+        // Channel type: @ for secret, = for public (no private channels in our impl).
+        let chan_type = if state.channel_is_secret(channel_name).await {
+            "@"
+        } else {
+            "="
+        };
+        // RPL_NAMREPLY: <type> <channel> :<nicks>
+        client.send_numeric(RPL_NAMREPLY, &[chan_type, channel_name, &names_str]);
     }
     client.send_numeric(RPL_ENDOFNAMES, &[channel_name, "End of /NAMES list"]);
 }
