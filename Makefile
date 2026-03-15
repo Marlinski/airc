@@ -1,4 +1,8 @@
-.PHONY: build aircd airc dev test clean
+.PHONY: build aircd airc dev test clean install
+
+# Install dependencies
+install:
+	cd packages/airc-client-ts && npm install
 
 # Build everything (Rust binaries + JS client)
 build:
