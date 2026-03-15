@@ -17,8 +17,8 @@ use std::sync::Arc;
 
 use tracing::{debug, info};
 
-use crate::module::{CommandContext, ServiceModule};
-use crate::nickserv::NickServState;
+use crate::services::module::{CommandContext, ServiceModule};
+use crate::services::nickserv::NickServState;
 
 /// Silence module for NickServ (SILENCE command).
 pub struct SilenceModule {

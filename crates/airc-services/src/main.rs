@@ -1,12 +1,8 @@
-//! airc-services — NickServ and ChanServ as external IRC clients.
+//! airc-services — external service bot framework for aircd.
 //!
-//! This binary connects to an aircd server as separate IRC clients
-//! (one per enabled service), authenticates via the OPER command to gain
-//! service privileges (+S mode), and handles user commands via PRIVMSG.
-//!
-//! Each service is composed of togglable modules (configured in TOML).
-//! Commands are dispatched through a [`module::ServiceDispatcher`] that
-//! iterates modules until one handles the command.
+//! NickServ and ChanServ are now embedded directly inside aircd (Phase A).
+//! This binary is kept as the foundation for **third-party / custom service
+//! bots** that connect to aircd as IRC clients.
 //!
 //! # Usage
 //!
@@ -14,12 +10,9 @@
 //! airc-services --config services.toml
 //! ```
 
-mod chanserv;
 mod config;
 mod module;
-mod nickserv;
 
-use std::path::Path;
 use std::sync::Arc;
 
 use clap::Parser;
@@ -35,9 +28,9 @@ use crate::module::ServiceDispatcher;
 // CLI
 // ---------------------------------------------------------------------------
 
-/// AIRC Services — NickServ and ChanServ for aircd.
+/// AIRC Services — external service bot framework for aircd.
 #[derive(Parser, Debug)]
-#[command(name = "airc-services", about = "IRC services for aircd")]
+#[command(name = "airc-services", about = "External IRC service bot framework for aircd")]
 struct Cli {
     /// Path to the TOML configuration file.
     #[arg(short, long)]
@@ -69,14 +62,14 @@ struct Cli {
 // ---------------------------------------------------------------------------
 
 /// A running service bot with its client and event receiver.
-struct ServiceBot {
-    _name: String,
-    client: IrcClient,
-    events: mpsc::Receiver<IrcEvent>,
+pub struct ServiceBot {
+    pub name: String,
+    pub client: IrcClient,
+    pub events: mpsc::Receiver<IrcEvent>,
 }
 
 /// Connect a service bot to the IRC server and authenticate via OPER.
-async fn connect_service(
+pub async fn connect_service(
     nick: &str,
     cfg: &ServicesConfig,
 ) -> Result<ServiceBot, Box<dyn std::error::Error>> {
@@ -99,7 +92,7 @@ async fn connect_service(
     client.send_oper(&cfg.oper_name, &cfg.oper_password).await?;
 
     Ok(ServiceBot {
-        _name: nick.to_string(),
+        name: nick.to_string(),
         client,
         events,
     })
@@ -107,7 +100,7 @@ async fn connect_service(
 
 /// Generic service event loop — dispatches incoming PRIVMSGs through a
 /// [`ServiceDispatcher`] that routes to the appropriate module.
-async fn run_service(
+pub async fn run_service(
     service_name: String,
     dispatcher: Arc<ServiceDispatcher>,
     client: IrcClient,
@@ -177,89 +170,14 @@ async fn main() {
         std::process::exit(1);
     }
 
-    let data_dir = Path::new(&cfg.data_dir);
-    if !data_dir.exists() {
-        if let Err(e) = std::fs::create_dir_all(data_dir) {
-            eprintln!("error: cannot create data directory {}: {e}", cfg.data_dir);
-            std::process::exit(1);
-        }
-    }
-
+    // NickServ and ChanServ are now embedded in aircd (Phase A).
+    // Add custom service bots here by calling connect_service() and run_service().
     info!(
         server = %cfg.server_addr,
-        oper_name = %cfg.oper_name,
-        nickserv = cfg.nickserv_enabled,
-        chanserv = cfg.chanserv_enabled,
-        "starting airc-services"
+        "airc-services started (no external bots configured — add custom bots here)"
     );
 
-    let mut handles = Vec::new();
-
-    // Start NickServ.
-    if cfg.nickserv_enabled {
-        match connect_service(&cfg.nickserv_nick, &cfg).await {
-            Ok(bot) => {
-                let state = Arc::new(nickserv::NickServState::new(bot.client.clone(), data_dir));
-                let dispatcher = Arc::new(nickserv::create_dispatcher(
-                    state,
-                    &cfg.nickserv_modules,
-                    &bot.client,
-                ));
-                let nick = cfg.nickserv_nick.clone();
-                let client = bot.client;
-                handles.push(tokio::spawn(run_service(
-                    "NickServ".to_string(),
-                    dispatcher,
-                    client,
-                    nick,
-                    bot.events,
-                )));
-                info!("NickServ started as '{}'", cfg.nickserv_nick);
-            }
-            Err(e) => {
-                error!(error = %e, "failed to connect NickServ");
-                std::process::exit(1);
-            }
-        }
-    }
-
-    // Start ChanServ.
-    if cfg.chanserv_enabled {
-        match connect_service(&cfg.chanserv_nick, &cfg).await {
-            Ok(bot) => {
-                let state = Arc::new(chanserv::ChanServState::new(data_dir));
-                let dispatcher = Arc::new(chanserv::create_dispatcher(
-                    state,
-                    &cfg.chanserv_modules,
-                    &bot.client,
-                ));
-                let nick = cfg.chanserv_nick.clone();
-                let client = bot.client;
-                handles.push(tokio::spawn(run_service(
-                    "ChanServ".to_string(),
-                    dispatcher,
-                    client,
-                    nick,
-                    bot.events,
-                )));
-                info!("ChanServ started as '{}'", cfg.chanserv_nick);
-            }
-            Err(e) => {
-                error!(error = %e, "failed to connect ChanServ");
-                std::process::exit(1);
-            }
-        }
-    }
-
-    if handles.is_empty() {
-        eprintln!("error: no services enabled — nothing to do");
-        std::process::exit(1);
-    }
-
-    // Wait for all service tasks to complete (they run indefinitely).
-    for handle in handles {
-        if let Err(e) = handle.await {
-            error!(error = %e, "service task panicked");
-        }
-    }
+    // Nothing to run — exit cleanly.
+    // In a real deployment, custom service bots would be registered here.
+    info!("no service bots registered; exiting");
 }

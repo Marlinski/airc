@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use tracing::info;
 
-use crate::chanserv::{ChanServState, RegisteredChannel};
-use crate::module::{CommandContext, ServiceModule};
+use crate::services::chanserv::{ChanServState, RegisteredChannel};
+use crate::services::module::{CommandContext, ServiceModule};
 
 /// Channel registration and settings module for ChanServ.
 pub struct RegistrationModule {

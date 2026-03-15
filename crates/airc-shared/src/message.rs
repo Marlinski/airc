@@ -102,6 +102,13 @@ pub enum Command {
     /// `KILL` — forcibly disconnect a user (operator/service command).
     Kill,
 
+    // -- Capability negotiation ---------------------------------------------
+    /// `CAP` — capability negotiation (IRCv3).
+    ///
+    /// The subcommand is the first parameter (`LS`, `LIST`, `REQ`, `ACK`,
+    /// `NAK`, `END`). Additional parameters follow as normal params.
+    Cap,
+
     // -- Server -------------------------------------------------------------
     /// `PING` — keepalive ping.
     Ping,
@@ -161,6 +168,7 @@ impl Command {
             "PONG" => Command::Pong,
             "MOTD" => Command::Motd,
             "VERSION" => Command::Version,
+            "CAP" => Command::Cap,
             _ => Command::Unknown(s.to_string()),
         }
     }
@@ -195,6 +203,7 @@ impl fmt::Display for Command {
             Command::Pong => f.write_str("PONG"),
             Command::Motd => f.write_str("MOTD"),
             Command::Version => f.write_str("VERSION"),
+            Command::Cap => f.write_str("CAP"),
             Command::Numeric(n) => write!(f, "{n:03}"),
             Command::Unknown(s) => f.write_str(s),
         }

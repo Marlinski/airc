@@ -4,8 +4,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use crate::chanserv::ChanServState;
-use crate::module::{CommandContext, ServiceModule};
+use crate::services::chanserv::ChanServState;
+use crate::services::module::{CommandContext, ServiceModule};
 
 /// Access control module for ChanServ (bans).
 pub struct AccessModule {

@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
-use crate::config::ChanServModules;
-use crate::module::{ServiceDispatcher, ServiceModule};
+use crate::services::ChanServModules;
+use crate::services::module::{ServiceDispatcher, ServiceModule};
 
 const PERSISTENCE_FILE: &str = "chanserv.json";
 
@@ -120,11 +120,10 @@ impl ChanServState {
         true
     }
 
-    // -- Join checking (for future S2S integration) -------------------------
+    // -- Join checking ------------------------------------------------------
 
     /// Check if a user is allowed to join a registered channel.
     /// Returns `Ok(())` if allowed, `Err(reason)` if denied.
-    #[allow(dead_code)]
     pub async fn check_join(
         &self,
         channel_name: &str,
@@ -194,10 +193,9 @@ pub fn build_modules(
 pub fn create_dispatcher(
     state: Arc<ChanServState>,
     modules_cfg: &ChanServModules,
-    client: &airc_client::IrcClient,
 ) -> ServiceDispatcher {
     let modules = build_modules(state, modules_cfg);
-    ServiceDispatcher::new("ChanServ".to_string(), modules, client)
+    ServiceDispatcher::new("ChanServ".to_string(), modules)
 }
 
 // ---------------------------------------------------------------------------

@@ -18,6 +18,7 @@ mod ipc;
 mod logger;
 mod relay;
 mod server;
+mod services;
 mod state;
 mod web;
 
@@ -276,8 +277,18 @@ fn run_server_foreground(cfg: ServerConfig) {
     });
 
     rt.block_on(async {
-        let state = state::SharedState::new(cfg, relay);
+        let state = state::SharedState::new(cfg.clone(), relay);
         state.create_default_channels().await;
+
+        // Initialize embedded services (NickServ / ChanServ).
+        let data_dir = cfg.services.data_dir.clone();
+        let svc_state = std::sync::Arc::new(services::ServicesState::new(
+            &cfg.services,
+            state.clone(),
+            &data_dir,
+        ));
+        state.set_services(svc_state);
+        tracing::info!("embedded services initialized (NickServ, ChanServ)");
 
         // Start HTTP API server.
         let http_addr = format!("0.0.0.0:{http_port}");

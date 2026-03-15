@@ -1,0 +1,54 @@
+//! NICK — change nickname after registration.
+
+use std::sync::Arc;
+
+use airc_shared::reply::*;
+use airc_shared::IrcMessage;
+use tracing::debug;
+
+use crate::client::ClientId;
+use crate::state::SharedState;
+
+pub async fn handle_nick(state: &SharedState, client_id: ClientId, msg: &IrcMessage) {
+    let Some(client) = state.get_client(client_id).await else {
+        return;
+    };
+
+    let Some(new_nick) = msg.params.first() else {
+        client.send_numeric(ERR_NONICKNAMEGIVEN, &["No nickname given"]);
+        return;
+    };
+
+    let old_prefix = client.prefix();
+
+    match state.update_nick(client_id, new_nick).await {
+        Ok(()) => {
+            // Notify the client and all peers in shared channels.
+            let nick_msg = IrcMessage::nick(new_nick).with_prefix(old_prefix.clone());
+            let line: Arc<str> = nick_msg.serialize().into();
+            client.send_line(&line);
+
+            let peers = state.peers_in_shared_channels(client_id).await;
+            for peer in &peers {
+                peer.send_line(&line);
+            }
+
+            // Log nick change to all shared channels.
+            let channels = state.channels_for_client(client_id).await;
+            for ch in &channels {
+                state.logger().log_nick_change(ch, &old_prefix, new_nick);
+            }
+
+            // Relay nick change to remote nodes.
+            state.relay_publish(&nick_msg).await;
+
+            debug!(client_id = %client_id, old = %old_prefix, new = %new_nick, "nick change");
+        }
+        Err(crate::state::NickError::InUse) => {
+            client.send_numeric(ERR_NICKNAMEINUSE, &[new_nick, "Nickname is already in use"]);
+        }
+        Err(crate::state::NickError::Invalid) => {
+            client.send_numeric(ERR_ERRONEUSNICKNAME, &[new_nick, "Erroneous nickname"]);
+        }
+    }
+}

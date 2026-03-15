@@ -8,8 +8,8 @@ use ed25519_dalek::{Signature, Verifier};
 use rand::Rng;
 use tracing::{debug, info, warn};
 
-use crate::module::{CommandContext, ServiceModule};
-use crate::nickserv::{
+use crate::services::module::{CommandContext, ServiceModule};
+use crate::services::nickserv::{
     Identity, NickServState, PendingChallenge, hex_decode, hex_encode, now_unix, parse_pubkey,
 };
 

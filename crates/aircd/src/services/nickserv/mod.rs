@@ -4,8 +4,8 @@
 //! - **identity**: REGISTER, IDENTIFY, INFO, GHOST/RELEASE
 //! - **keypair**: REGISTER-KEY, CHALLENGE, VERIFY
 //! - **reputation**: VOUCH, REPORT, REPUTATION
-//! - **social**: FRIEND (social graph, moved from aircd)
-//! - **silence**: SILENCE (client-side filtering, moved from aircd)
+//! - **social**: FRIEND (social graph)
+//! - **silence**: SILENCE (client-side filtering)
 
 pub mod identity;
 pub mod keypair;
@@ -22,8 +22,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
-use crate::config::NickServModules;
-use crate::module::{ServiceDispatcher, ServiceModule};
+use crate::services::NickServModules;
+use crate::services::module::{ServiceDispatcher, ServiceModule};
 
 const PERSISTENCE_FILE: &str = "nickserv.json";
 
@@ -112,13 +112,13 @@ pub struct NickServState {
     silence_lists: RwLock<HashMap<String, SilenceList>>,
     /// Directory for persistence files.
     data_dir: PathBuf,
-    /// IRC client connection for raw line sends (e.g. KILL for GHOST).
-    client: airc_client::IrcClient,
+    /// Shared server state for operations like GHOST/KILL.
+    state: crate::state::SharedState,
 }
 
 impl NickServState {
     /// Create a new NickServState, loading persisted data from disk.
-    pub fn new(client: airc_client::IrcClient, data_dir: &Path) -> Self {
+    pub fn new(state: crate::state::SharedState, data_dir: &Path) -> Self {
         let persistence_path = data_dir.join(PERSISTENCE_FILE);
         let identities = load_identities(&persistence_path).unwrap_or_default();
 
@@ -135,8 +135,13 @@ impl NickServState {
             friend_lists: RwLock::new(friend_lists),
             silence_lists: RwLock::new(silence_lists),
             data_dir: data_dir.to_path_buf(),
-            client,
+            state,
         }
+    }
+
+    /// Accessor for the shared server state (e.g. for GHOST/KILL operations).
+    pub fn shared_state(&self) -> &crate::state::SharedState {
+        &self.state
     }
 
     // -- Identity queries ---------------------------------------------------
@@ -246,11 +251,6 @@ impl NickServState {
     }
 
     // -- Friend lists -------------------------------------------------------
-
-    /// Send a raw IRC line (e.g. KILL for GHOST command).
-    pub async fn send_raw_line(&self, line: &str) -> Result<(), String> {
-        self.client.send_line(line).await.map_err(|e| e.to_string())
-    }
 
     /// Add a friend to an identity's friend list.
     pub async fn add_friend(&self, nick: &str, friend_nick: &str) -> bool {
@@ -408,10 +408,9 @@ pub fn build_modules(
 pub fn create_dispatcher(
     state: Arc<NickServState>,
     modules_cfg: &NickServModules,
-    client: &airc_client::IrcClient,
 ) -> ServiceDispatcher {
     let modules = build_modules(state, modules_cfg);
-    ServiceDispatcher::new("NickServ".to_string(), modules, client)
+    ServiceDispatcher::new("NickServ".to_string(), modules)
 }
 
 // ---------------------------------------------------------------------------

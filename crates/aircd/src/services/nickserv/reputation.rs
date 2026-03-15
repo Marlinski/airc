@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use tracing::info;
 
-use crate::module::{CommandContext, ServiceModule};
-use crate::nickserv::NickServState;
+use crate::services::module::{CommandContext, ServiceModule};
+use crate::services::nickserv::NickServState;
 
 /// Reputation management module for NickServ.
 pub struct ReputationModule {

@@ -20,6 +20,7 @@ use crate::client::{ClientHandle, ClientId, ClientInfo, ClientKind};
 use crate::config::ServerConfig;
 use crate::logger::ChannelLogger;
 use crate::relay::Relay;
+use crate::services::ServicesState;
 use crate::web;
 
 // ---------------------------------------------------------------------------
@@ -51,6 +52,9 @@ struct Inner {
     logger: ChannelLogger,
     relay: Arc<dyn Relay>,
     started_at: Instant,
+    /// Embedded NickServ / ChanServ services. Set after SharedState is created
+    /// to avoid the chicken-and-egg dependency (ServicesState needs SharedState).
+    services: tokio::sync::OnceCell<Arc<ServicesState>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -78,6 +82,7 @@ impl SharedState {
                 logger: ChannelLogger::new(log_dir),
                 relay,
                 started_at: Instant::now(),
+                services: tokio::sync::OnceCell::new(),
             }),
         }
     }
@@ -86,6 +91,20 @@ impl SharedState {
     #[allow(dead_code)] // Will be used by handler.rs in upcoming relay wiring.
     pub fn relay(&self) -> &dyn Relay {
         &*self.inner.relay
+    }
+
+    /// Initialize embedded services. Must be called once after `SharedState::new()`.
+    pub fn set_services(&self, services: Arc<ServicesState>) {
+        // Ignore the error if already set (shouldn't happen in normal operation).
+        let _ = self.inner.services.set(services);
+    }
+
+    /// Access embedded services (NickServ / ChanServ).
+    ///
+    /// Returns `None` if services have not been initialized yet (between
+    /// `SharedState::new()` and the `set_services()` call).
+    pub fn services(&self) -> Option<Arc<ServicesState>> {
+        self.inner.services.get().cloned()
     }
 
     // -- Identity -----------------------------------------------------------
@@ -488,6 +507,19 @@ impl SharedState {
             .collect()
     }
 
+    /// Return handles for all currently connected local clients.
+    pub async fn all_clients(&self) -> Vec<ClientHandle> {
+        self.inner.clients.read().await.values().cloned().collect()
+    }
+
+    /// Return `true` if `a` and `b` share at least one common channel.
+    pub async fn shares_channel(&self, a: ClientId, b: ClientId) -> bool {
+        let channels = self.inner.channels.read().await;
+        channels
+            .values()
+            .any(|ch| ch.is_member_id(a) && ch.is_member_id(b))
+    }
+
     /// Get local channel member handles excluding a given client.
     pub async fn channel_members_except(
         &self,
@@ -841,6 +873,24 @@ impl SharedState {
         if let Some(handle) = self.inner.clients.write().await.get_mut(&id) {
             handle.info = Arc::new(handle.info.with_mode(flag));
         }
+    }
+
+    /// Remove a user mode flag from a client (e.g. `'i'`).
+    pub async fn remove_user_mode(&self, id: ClientId, flag: char) {
+        if let Some(handle) = self.inner.clients.write().await.get_mut(&id) {
+            handle.info = Arc::new(handle.info.without_mode(flag));
+        }
+    }
+
+    /// Return `true` if the given client has the invisible (`+i`) mode set.
+    #[allow(dead_code)]
+    pub async fn client_is_invisible(&self, id: ClientId) -> bool {
+        self.inner
+            .clients
+            .read()
+            .await
+            .get(&id)
+            .is_some_and(|h| h.info.is_invisible())
     }
 
     /// Get the user mode string for a client (e.g. `"+oS"`).

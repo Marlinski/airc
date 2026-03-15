@@ -20,6 +20,7 @@
 //! to the plain-text IRC port.
 
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::Deserialize;
@@ -75,6 +76,69 @@ impl Default for RelayConfig {
     }
 }
 
+/// Services (NickServ / ChanServ) configuration embedded in `aircd.toml`.
+///
+/// Configured in TOML as:
+/// ```toml
+/// [services]
+/// data_dir = "data/services"
+///
+/// [services.nickserv]
+/// enabled = true
+/// enforce_registered = false
+///
+/// [services.chanserv]
+/// enabled = true
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ServicesConfig {
+    pub nickserv: NickServConfig,
+    pub chanserv: ChanServConfig,
+    pub data_dir: PathBuf,
+}
+
+impl Default for ServicesConfig {
+    fn default() -> Self {
+        Self {
+            nickserv: NickServConfig::default(),
+            chanserv: ChanServConfig::default(),
+            data_dir: PathBuf::from("data/services"),
+        }
+    }
+}
+
+/// NickServ-specific settings within `[services.nickserv]`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct NickServConfig {
+    pub enabled: bool,
+    /// Kick unregistered users from channels that require identification.
+    pub enforce_registered: bool,
+}
+
+impl Default for NickServConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            enforce_registered: false,
+        }
+    }
+}
+
+/// ChanServ-specific settings within `[services.chanserv]`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ChanServConfig {
+    pub enabled: bool,
+}
+
+impl Default for ChanServConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 /// Deserialized representation of `aircd.toml`.
 ///
 /// All fields are optional — missing fields are filled from defaults or env.
@@ -105,6 +169,9 @@ struct ConfigFile {
     /// Relay backend configuration.
     #[serde(default)]
     relay: RelayConfig,
+    /// Services (NickServ / ChanServ) configuration.
+    #[serde(default)]
+    services: ServicesConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -134,6 +201,8 @@ pub struct ServerConfig {
     pub operators: Vec<OperatorEntry>,
     /// Relay backend configuration.
     pub relay: RelayConfig,
+    /// Services (NickServ / ChanServ) configuration.
+    pub services: ServicesConfig,
 }
 
 impl Default for ServerConfig {
@@ -149,6 +218,7 @@ impl Default for ServerConfig {
             tls_bind: None,
             operators: Vec::new(),
             relay: RelayConfig::default(),
+            services: ServicesConfig::default(),
         }
     }
 }
@@ -241,6 +311,9 @@ impl ServerConfig {
 
             // Relay configuration.
             cfg.relay = f.relay;
+
+            // Services configuration.
+            cfg.services = f.services;
 
             // MOTD: inline takes precedence over file path.
             if let Some(lines) = f.motd {

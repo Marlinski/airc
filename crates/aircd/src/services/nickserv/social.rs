@@ -16,8 +16,8 @@ use std::sync::Arc;
 
 use tracing::{debug, info};
 
-use crate::module::{CommandContext, ServiceModule};
-use crate::nickserv::NickServState;
+use crate::services::module::{CommandContext, ServiceModule};
+use crate::services::nickserv::NickServState;
 
 /// Social graph module for NickServ (FRIEND command).
 pub struct SocialModule {
@@ -91,17 +91,15 @@ impl SocialModule {
                     ))
                     .await;
                 }
-            } else {
-                if self.state.remove_friend(ctx.sender, target_nick).await {
-                    ctx.reply(&format!("\x02{target_nick}\x02 is no longer your friend."))
-                        .await;
-                    debug!(sender = %ctx.sender, target = %target_nick, "NickServ: friend -nick");
-                } else {
-                    ctx.reply(&format!(
-                        "\x02{target_nick}\x02 is not in your friend list."
-                    ))
+            } else if self.state.remove_friend(ctx.sender, target_nick).await {
+                ctx.reply(&format!("\x02{target_nick}\x02 is no longer your friend."))
                     .await;
-                }
+                debug!(sender = %ctx.sender, target = %target_nick, "NickServ: friend -nick");
+            } else {
+                ctx.reply(&format!(
+                    "\x02{target_nick}\x02 is not in your friend list."
+                ))
+                .await;
             }
         }
 

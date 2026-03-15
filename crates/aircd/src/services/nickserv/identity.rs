@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use tracing::{info, warn};
 
-use crate::module::{CommandContext, ServiceModule};
-use crate::nickserv::{Identity, NickServState, now_unix, simple_hash};
+use crate::services::module::{CommandContext, ServiceModule};
+use crate::services::nickserv::{Identity, NickServState, now_unix, simple_hash};
 
 /// Identity management module for NickServ.
 pub struct IdentityModule {
@@ -147,23 +147,43 @@ impl IdentityModule {
             }
         }
 
-        // Send KILL command to disconnect the client using that nick.
-        // This requires +S (service) mode, which we get via OPER.
-        let kill_reason = format!("Killed (NickServ (GHOST command used by {}))", ctx.sender);
-        let kill_line = format!("KILL {} :{}", nick, kill_reason);
-        if let Err(e) = self.state.send_raw_line(&kill_line).await {
-            warn!(error = %e, "NickServ: failed to send KILL for GHOST");
-            ctx.reply("Failed to disconnect the ghost session.").await;
-            return;
-        }
-
-        ctx.reply(&format!("Ghost of \x02{}\x02 has been disconnected.", nick))
-            .await;
-        info!(
-            sender = %ctx.sender,
-            target = %nick,
-            "NickServ: GHOST disconnected client"
+        // Forcibly disconnect the client using that nick via SharedState.
+        let kill_reason = format!(
+            "Killed (NickServ (GHOST command used by {}))",
+            ctx.sender
         );
+        match self.state.shared_state().force_disconnect(nick).await {
+            Some((disconnected, peers)) => {
+                // Send ERROR to the disconnected client.
+                let error_line: Arc<str> =
+                    format!("ERROR :Killed (NickServ (GHOST command used by {}))\r\n", ctx.sender)
+                        .into();
+                disconnected.send_line(&error_line);
+
+                // Broadcast QUIT to peers.
+                let quit_msg = airc_shared::IrcMessage::quit(Some(&kill_reason))
+                    .with_prefix(&disconnected.prefix());
+                let quit_line: Arc<str> = quit_msg.serialize().into();
+                for peer in &peers {
+                    peer.send_line(&quit_line);
+                }
+
+                ctx.reply(&format!(
+                    "Ghost of \x02{}\x02 has been disconnected.",
+                    nick
+                ))
+                .await;
+                info!(
+                    sender = %ctx.sender,
+                    target = %nick,
+                    "NickServ: GHOST disconnected client"
+                );
+            }
+            None => {
+                ctx.reply(&format!("{} is not currently online.", nick))
+                    .await;
+            }
+        }
     }
 }
 

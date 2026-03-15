@@ -1,4 +1,7 @@
-//! Configuration for airc-services.
+//! Configuration for airc-services (external bot framework).
+//!
+//! NickServ and ChanServ are now embedded in aircd — this config only covers
+//! the connection parameters used by external service bots.
 //!
 //! Loading order (each layer overrides the previous):
 //! 1. Compiled defaults
@@ -28,83 +31,8 @@ struct ConfigFile {
     oper_name: Option<String>,
     /// Operator password for OPER authentication.
     oper_password: Option<String>,
-    /// Directory for persistence files (nickserv.json, chanserv.json).
+    /// Directory for persistence files.
     data_dir: Option<String>,
-    /// NickServ configuration.
-    nickserv: NickServConfig,
-    /// ChanServ configuration.
-    chanserv: ChanServConfig,
-}
-
-/// NickServ-specific configuration.
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-struct NickServConfig {
-    /// Whether NickServ is enabled.
-    enabled: Option<bool>,
-    /// Nickname for the NickServ bot.
-    nick: Option<String>,
-    /// Module toggles.
-    modules: Option<NickServModulesConfig>,
-}
-
-/// NickServ module toggles (all default to `true`).
-#[derive(Debug, Deserialize)]
-#[serde(default)]
-struct NickServModulesConfig {
-    /// REGISTER, IDENTIFY, INFO, GHOST/RELEASE.
-    identity: Option<bool>,
-    /// REGISTER-KEY, CHALLENGE, VERIFY.
-    keypair: Option<bool>,
-    /// VOUCH, REPORT, REPUTATION.
-    reputation: Option<bool>,
-    /// FRIEND (social graph, moved from aircd).
-    social: Option<bool>,
-    /// SILENCE (client-side filtering, moved from aircd).
-    silence: Option<bool>,
-}
-
-impl Default for NickServModulesConfig {
-    fn default() -> Self {
-        Self {
-            identity: Some(true),
-            keypair: Some(true),
-            reputation: Some(true),
-            social: Some(true),
-            silence: Some(true),
-        }
-    }
-}
-
-/// ChanServ-specific configuration.
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-struct ChanServConfig {
-    /// Whether ChanServ is enabled.
-    enabled: Option<bool>,
-    /// Nickname for the ChanServ bot.
-    nick: Option<String>,
-    /// Module toggles.
-    modules: Option<ChanServModulesConfig>,
-}
-
-/// ChanServ module toggles (all default to `true`).
-#[derive(Debug, Deserialize)]
-#[serde(default)]
-struct ChanServModulesConfig {
-    /// REGISTER, INFO, SET.
-    registration: Option<bool>,
-    /// BAN, UNBAN (+ check_join).
-    access: Option<bool>,
-}
-
-impl Default for ChanServModulesConfig {
-    fn default() -> Self {
-        Self {
-            registration: Some(true),
-            access: Some(true),
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -126,56 +54,6 @@ pub struct ServicesConfig {
     pub oper_password: String,
     /// Directory for persistence files.
     pub data_dir: String,
-    /// Whether NickServ is enabled.
-    pub nickserv_enabled: bool,
-    /// Nickname for the NickServ bot.
-    pub nickserv_nick: String,
-    /// NickServ module toggles.
-    pub nickserv_modules: NickServModules,
-    /// Whether ChanServ is enabled.
-    pub chanserv_enabled: bool,
-    /// Nickname for the ChanServ bot.
-    pub chanserv_nick: String,
-    /// ChanServ module toggles.
-    pub chanserv_modules: ChanServModules,
-}
-
-/// Resolved NickServ module toggles.
-#[derive(Debug, Clone)]
-pub struct NickServModules {
-    pub identity: bool,
-    pub keypair: bool,
-    pub reputation: bool,
-    pub social: bool,
-    pub silence: bool,
-}
-
-impl Default for NickServModules {
-    fn default() -> Self {
-        Self {
-            identity: true,
-            keypair: true,
-            reputation: true,
-            social: true,
-            silence: true,
-        }
-    }
-}
-
-/// Resolved ChanServ module toggles.
-#[derive(Debug, Clone)]
-pub struct ChanServModules {
-    pub registration: bool,
-    pub access: bool,
-}
-
-impl Default for ChanServModules {
-    fn default() -> Self {
-        Self {
-            registration: true,
-            access: true,
-        }
-    }
 }
 
 impl Default for ServicesConfig {
@@ -187,12 +65,6 @@ impl Default for ServicesConfig {
             oper_name: "services".to_string(),
             oper_password: String::new(),
             data_dir: ".".to_string(),
-            nickserv_enabled: true,
-            nickserv_nick: "NickServ".to_string(),
-            nickserv_modules: NickServModules::default(),
-            chanserv_enabled: true,
-            chanserv_nick: "ChanServ".to_string(),
-            chanserv_modules: ChanServModules::default(),
         }
     }
 }
@@ -239,47 +111,6 @@ impl ServicesConfig {
             }
             if let Some(v) = f.data_dir {
                 cfg.data_dir = v;
-            }
-            if let Some(v) = f.nickserv.enabled {
-                cfg.nickserv_enabled = v;
-            }
-            if let Some(v) = f.nickserv.nick {
-                cfg.nickserv_nick = v;
-            }
-            if let Some(v) = f.chanserv.enabled {
-                cfg.chanserv_enabled = v;
-            }
-            if let Some(v) = f.chanserv.nick {
-                cfg.chanserv_nick = v;
-            }
-
-            // NickServ module toggles.
-            if let Some(ref mods) = f.nickserv.modules {
-                if let Some(v) = mods.identity {
-                    cfg.nickserv_modules.identity = v;
-                }
-                if let Some(v) = mods.keypair {
-                    cfg.nickserv_modules.keypair = v;
-                }
-                if let Some(v) = mods.reputation {
-                    cfg.nickserv_modules.reputation = v;
-                }
-                if let Some(v) = mods.social {
-                    cfg.nickserv_modules.social = v;
-                }
-                if let Some(v) = mods.silence {
-                    cfg.nickserv_modules.silence = v;
-                }
-            }
-
-            // ChanServ module toggles.
-            if let Some(ref mods) = f.chanserv.modules {
-                if let Some(v) = mods.registration {
-                    cfg.chanserv_modules.registration = v;
-                }
-                if let Some(v) = mods.access {
-                    cfg.chanserv_modules.access = v;
-                }
             }
         }
 

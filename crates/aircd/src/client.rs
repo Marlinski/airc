@@ -95,6 +95,21 @@ impl ClientInfo {
         new
     }
 
+    /// Remove a mode flag if present. Returns a new `ClientInfo`.
+    pub fn without_mode(&self, flag: char) -> ClientInfo {
+        if !self.modes.contains(flag) {
+            return self.clone();
+        }
+        let mut new = self.clone();
+        new.modes.retain(|c| c != flag);
+        new
+    }
+
+    /// Check whether this user has the invisible mode (`+i`).
+    pub fn is_invisible(&self) -> bool {
+        self.has_mode('i')
+    }
+
     /// Check whether this user is an IRC operator (`+o`).
     pub fn is_oper(&self) -> bool {
         self.has_mode('o')
@@ -166,6 +181,14 @@ impl ClientHandle {
     pub fn send_numeric(&self, code: u16, params: &[&str]) {
         let msg =
             IrcMessage::numeric(code, &self.info.nick, params).with_prefix(&*self.server_name);
+        self.send_message(&msg);
+    }
+
+    /// Send a `NOTICE` from `from` to `target` with the given `text`.
+    ///
+    /// Produces: `:<from> NOTICE <target> :<text>`
+    pub fn send_notice(&self, from: &str, target: &str, text: &str) {
+        let msg = IrcMessage::notice(target, text).with_prefix(from);
         self.send_message(&msg);
     }
 

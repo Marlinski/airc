@@ -142,8 +142,18 @@ impl Connection {
         handle_unexpected_disconnect(&self.state, self.id).await;
     }
 
-    /// Handle the registration handshake: wait for NICK + USER, validate,
-    /// register, send welcome burst.
+    /// Handle the registration handshake: wait for NICK + USER (+ optional CAP
+    /// negotiation), validate, register, send welcome burst.
+    ///
+    /// CAP flow:
+    /// - `CAP LS [302]` → reply `CAP * LS :` (empty list — no caps yet)
+    /// - `CAP LIST`     → reply `CAP * LIST :`
+    /// - `CAP REQ`      → reply `CAP * NAK :<caps>` (reject all for now)
+    /// - `CAP END`      → clear `cap_negotiating`; complete registration if
+    ///                    NICK+USER already received
+    ///
+    /// Registration is deferred until both CAP negotiation is finished AND
+    /// NICK+USER have been received.
     async fn registration_phase<R: AsyncBufRead + Unpin>(
         &self,
         reader: &mut R,
@@ -151,6 +161,7 @@ impl Connection {
     ) -> Option<ClientHandle> {
         let mut pending_nick: Option<String> = None;
         let mut pending_user: Option<(String, String)> = None; // (username, realname)
+        let mut cap_negotiating = false;
         let mut line_buf = String::new();
 
         // Helper to send a raw line during pre-registration (no ClientHandle yet).
@@ -184,6 +195,52 @@ impl Connection {
             };
 
             match &msg.command {
+                Command::Cap => {
+                    let subcommand = msg.params.first().map(|s| s.to_ascii_uppercase());
+                    match subcommand.as_deref() {
+                        Some("LS") => {
+                            // Begin CAP negotiation.
+                            cap_negotiating = true;
+                            // Reply with empty capability list.
+                            // Use the nick we have so far, or "*" if not yet known.
+                            let nick = pending_nick.as_deref().unwrap_or("*");
+                            let reply = format!(
+                                ":{} CAP {} LS :",
+                                self.state.server_name(),
+                                nick
+                            );
+                            send_raw(reply).await;
+                        }
+                        Some("LIST") => {
+                            let nick = pending_nick.as_deref().unwrap_or("*");
+                            let reply = format!(
+                                ":{} CAP {} LIST :",
+                                self.state.server_name(),
+                                nick
+                            );
+                            send_raw(reply).await;
+                        }
+                        Some("REQ") => {
+                            // Reject all capability requests.
+                            let nick = pending_nick.as_deref().unwrap_or("*");
+                            let caps = msg.params.get(1).map(|s| s.as_str()).unwrap_or("");
+                            let reply = format!(
+                                ":{} CAP {} NAK :{}",
+                                self.state.server_name(),
+                                nick,
+                                caps
+                            );
+                            send_raw(reply).await;
+                        }
+                        Some("END") => {
+                            cap_negotiating = false;
+                            // Fall through to the registration-completion check below.
+                        }
+                        _ => {
+                            // Unknown CAP subcommand — ignore.
+                        }
+                    }
+                }
                 Command::Nick => {
                     if let Some(nick) = msg.params.first() {
                         pending_nick = Some(nick.clone());
@@ -228,7 +285,11 @@ impl Connection {
                 }
             }
 
-            // Try to complete registration.
+            // Complete registration only when CAP negotiation is done AND
+            // both NICK and USER have been received.
+            if cap_negotiating {
+                continue;
+            }
             if let (Some(nick), Some((username, realname))) = (&pending_nick, &pending_user) {
                 match self
                     .state
