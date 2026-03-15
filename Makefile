@@ -1,8 +1,9 @@
 .PHONY: build aircd airc dev test clean
 
-# Build everything
+# Build everything (Rust binaries + JS client)
 build:
 	cargo build
+	cd packages/airc-client-ts && npm run build
 
 # Build the server daemon
 aircd:
