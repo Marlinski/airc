@@ -1,5 +1,22 @@
 //! Client configuration.
 
+/// Default IRC server address.
+pub const DEFAULT_SERVER: &str = "irc.openlore.xyz:6697";
+
+/// Default nickname.
+pub const DEFAULT_NICK: &str = "agent";
+
+/// TLS mode for IRC connections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TlsMode {
+    /// Always use TLS (fail if TLS handshake fails).
+    Required,
+    /// Try TLS first, fall back to plain TCP on failure.
+    Preferred,
+    /// Never use TLS (plain TCP only).
+    Disabled,
+}
+
 /// Configuration for an IRC client connection.
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
@@ -17,6 +34,8 @@ pub struct ClientConfig {
     pub auto_join: Vec<String>,
     /// Maximum number of messages to buffer per channel.
     pub buffer_size: usize,
+    /// TLS mode. Defaults to [`TlsMode::Preferred`].
+    pub tls: TlsMode,
 }
 
 impl ClientConfig {
@@ -30,6 +49,7 @@ impl ClientConfig {
             password: None,
             auto_join: Vec::new(),
             buffer_size: 1000,
+            tls: TlsMode::Preferred,
         }
     }
 
@@ -65,6 +85,13 @@ impl ClientConfig {
     #[must_use]
     pub fn with_buffer_size(mut self, size: usize) -> Self {
         self.buffer_size = size;
+        self
+    }
+
+    /// Set the TLS mode.
+    #[must_use]
+    pub fn with_tls(mut self, tls: TlsMode) -> Self {
+        self.tls = tls;
         self
     }
 }

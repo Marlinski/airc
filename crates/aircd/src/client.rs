@@ -1,6 +1,7 @@
 //! Per-client data and the handle used to communicate with a connected client.
 
 use std::fmt;
+use std::sync::Arc;
 
 use airc_shared::IrcMessage;
 use tokio::sync::mpsc;
@@ -43,6 +44,31 @@ impl ClientInfo {
     pub fn prefix(&self) -> String {
         format!("{}!{}@{}", self.nick, self.username, self.hostname)
     }
+
+    /// Check whether the user has a given mode flag (e.g. `'o'`, `'S'`).
+    pub fn has_mode(&self, flag: char) -> bool {
+        self.modes.contains(flag)
+    }
+
+    /// Add a mode flag if not already present. Returns a new `ClientInfo`.
+    pub fn with_mode(&self, flag: char) -> ClientInfo {
+        if self.modes.contains(flag) {
+            return self.clone();
+        }
+        let mut new = self.clone();
+        new.modes.push(flag);
+        new
+    }
+
+    /// Check whether this user is an IRC operator (`+o`).
+    pub fn is_oper(&self) -> bool {
+        self.has_mode('o')
+    }
+
+    /// Check whether this user is a service (`+S`).
+    pub fn is_service(&self) -> bool {
+        self.has_mode('S')
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -51,27 +77,27 @@ impl ClientInfo {
 
 /// A handle to a connected client.
 ///
-/// Cheap to clone — the expensive part (the mpsc sender) is behind an `Arc`
-/// internally in tokio. Cloning a `ClientHandle` does **not** duplicate the
-/// connection; it merely gives another way to push lines to the client's
-/// write task.
+/// Cheap to clone — `info` is behind `Arc` (atomic refcount bump) and
+/// the mpsc sender is behind an `Arc` internally in tokio.
+/// Cloning a `ClientHandle` does **not** duplicate the connection;
+/// it merely gives another way to push lines to the client's write task.
 #[derive(Debug, Clone)]
 pub struct ClientHandle {
     pub id: ClientId,
-    pub info: ClientInfo,
+    pub info: Arc<ClientInfo>,
     /// Sender half of the channel to the client's writer task.
-    tx: mpsc::Sender<String>,
+    tx: mpsc::Sender<Arc<str>>,
     /// Server name, cached so we can build numeric replies cheaply.
-    server_name: String,
+    server_name: Arc<str>,
 }
 
 impl ClientHandle {
     /// Create a new handle.
     pub fn new(
         id: ClientId,
-        info: ClientInfo,
-        tx: mpsc::Sender<String>,
-        server_name: String,
+        info: Arc<ClientInfo>,
+        tx: mpsc::Sender<Arc<str>>,
+        server_name: Arc<str>,
     ) -> Self {
         Self {
             id,
@@ -86,28 +112,38 @@ impl ClientHandle {
         self.info.prefix()
     }
 
-    /// Send a pre-built `IrcMessage` to this client.
+    /// Send a pre-built `IrcMessage` to this client (serializes the message).
     pub fn send_message(&self, msg: &IrcMessage) {
-        let line = msg.serialize();
+        let line: Arc<str> = msg.serialize().into();
         // Fire-and-forget: if the channel is full or closed the client is gone.
         let _ = self.tx.try_send(line);
     }
 
+    /// Send a pre-serialized IRC line (as `Arc<str>`) to this client.
+    ///
+    /// Use this when the same message is being sent to many recipients to
+    /// avoid re-serializing the `IrcMessage` for each one.
+    pub fn send_line(&self, line: &Arc<str>) {
+        let _ = self.tx.try_send(Arc::clone(line));
+    }
+
     /// Build and send a numeric reply: `:server CODE nick <params...>`.
     pub fn send_numeric(&self, code: u16, params: &[&str]) {
-        let msg = IrcMessage::numeric(code, &self.info.nick, params).with_prefix(&self.server_name);
+        let msg =
+            IrcMessage::numeric(code, &self.info.nick, params).with_prefix(&*self.server_name);
         self.send_message(&msg);
     }
 
     /// Send a raw IRC line (already serialized).
     #[allow(dead_code)] // Future use for direct raw sends.
     pub fn send_raw(&self, line: String) {
-        let _ = self.tx.try_send(line);
+        let arc: Arc<str> = line.into();
+        let _ = self.tx.try_send(arc);
     }
 
     /// The underlying sender, exposed for the connection writer task.
     #[allow(dead_code)] // Future use for external write access.
-    pub fn sender(&self) -> &mpsc::Sender<String> {
+    pub fn sender(&self) -> &mpsc::Sender<Arc<str>> {
         &self.tx
     }
 }

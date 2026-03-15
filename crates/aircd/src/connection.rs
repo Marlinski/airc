@@ -4,12 +4,15 @@
 //! a transport-agnostic reader, handles the IRC registration handshake
 //! (NICK + USER → welcome burst), and then dispatches commands to the handler.
 //!
-//! The writer side is always an `mpsc::Sender<String>` — the actual transport
-//! (TCP socket, WebSocket, etc.) drains that channel in its own write loop.
+//! The writer side is always an `mpsc::Sender<Arc<str>>` — the actual transport
+//! (TCP socket, WebSocket, TLS, etc.) drains that channel in its own write loop.
 
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
+use std::sync::Arc;
+
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tokio_rustls::server::TlsStream;
 use tracing::{debug, info, warn};
 
 use airc_shared::reply::*;
@@ -41,10 +44,10 @@ impl Connection {
     /// Run the connection over a plain TCP stream.
     pub async fn run_tcp(self, stream: TcpStream) {
         let (reader, writer) = stream.into_split();
-        let (tx, rx) = mpsc::channel::<String>(SEND_BUFFER);
+        let (tx, rx) = mpsc::channel::<Arc<str>>(SEND_BUFFER);
 
         // Spawn the writer task for TCP.
-        let writer_handle = tokio::spawn(tcp_write_loop(writer, rx));
+        let writer_handle = tokio::spawn(write_loop(writer, rx));
 
         // Run the reader (registration + command dispatch).
         self.read_loop(BufReader::new(reader), tx).await;
@@ -53,6 +56,23 @@ impl Connection {
         let _ = writer_handle.await;
 
         info!(client_id = %self.id, "connection closed");
+    }
+
+    /// Run the connection over a TLS-wrapped TCP stream.
+    pub async fn run_tls(self, stream: TlsStream<TcpStream>) {
+        let (reader, writer) = tokio::io::split(stream);
+        let (tx, rx) = mpsc::channel::<Arc<str>>(SEND_BUFFER);
+
+        // Spawn the writer task for TLS.
+        let writer_handle = tokio::spawn(write_loop(writer, rx));
+
+        // Run the reader (registration + command dispatch).
+        self.read_loop(BufReader::new(reader), tx).await;
+
+        // Reader is done — the writer will finish once tx is dropped.
+        let _ = writer_handle.await;
+
+        info!(client_id = %self.id, "TLS connection closed");
     }
 
     /// Run the connection over a generic line-based reader.
@@ -66,14 +86,14 @@ impl Connection {
     pub async fn run_generic<R: AsyncBufRead + Unpin + Send + 'static>(
         self,
         reader: R,
-        tx: mpsc::Sender<String>,
+        tx: mpsc::Sender<Arc<str>>,
     ) {
         self.read_loop(reader, tx).await;
         info!(client_id = %self.id, "connection closed");
     }
 
     /// Read lines from a buffered reader, handle registration, then dispatch.
-    async fn read_loop<R: AsyncBufRead + Unpin>(&self, mut reader: R, tx: mpsc::Sender<String>) {
+    async fn read_loop<R: AsyncBufRead + Unpin>(&self, mut reader: R, tx: mpsc::Sender<Arc<str>>) {
         // --- Registration phase ---
         let client = match self.registration_phase(&mut reader, &tx).await {
             Some(c) => c,
@@ -127,7 +147,7 @@ impl Connection {
     async fn registration_phase<R: AsyncBufRead + Unpin>(
         &self,
         reader: &mut R,
-        tx: &mpsc::Sender<String>,
+        tx: &mpsc::Sender<Arc<str>>,
     ) -> Option<ClientHandle> {
         let mut pending_nick: Option<String> = None;
         let mut pending_user: Option<(String, String)> = None; // (username, realname)
@@ -137,7 +157,8 @@ impl Connection {
         let send_raw = |line: String| {
             let tx = tx.clone();
             async move {
-                let _ = tx.send(line).await;
+                let arc: Arc<str> = line.into();
+                let _ = tx.send(arc).await;
             }
         };
 
@@ -278,17 +299,29 @@ fn send_welcome_burst(state: &SharedState, client: &ClientHandle) {
 }
 
 // ---------------------------------------------------------------------------
-// TCP writer task
+// Writer task (generic over any AsyncWrite)
 // ---------------------------------------------------------------------------
 
-/// Drains the outgoing channel and writes lines to a TCP socket.
-async fn tcp_write_loop(
-    mut writer: tokio::net::tcp::OwnedWriteHalf,
-    mut rx: mpsc::Receiver<String>,
-) {
+/// Drains the outgoing channel and writes IRC lines to any async writer.
+///
+/// Batches multiple queued messages into a single buffer before calling
+/// `write_all()`, reducing the number of syscalls under load.
+async fn write_loop<W: AsyncWrite + Unpin>(mut writer: W, mut rx: mpsc::Receiver<Arc<str>>) {
+    let mut buf = Vec::with_capacity(1024);
+
     while let Some(line) = rx.recv().await {
-        let mut buf = line.into_bytes();
+        buf.clear();
+
+        // Write the first message.
+        buf.extend_from_slice(line.as_bytes());
         buf.extend_from_slice(b"\r\n");
+
+        // Drain any additional queued messages without blocking.
+        while let Ok(extra) = rx.try_recv() {
+            buf.extend_from_slice(extra.as_bytes());
+            buf.extend_from_slice(b"\r\n");
+        }
+
         if writer.write_all(&buf).await.is_err() {
             break;
         }
@@ -317,8 +350,9 @@ async fn handle_unexpected_disconnect(state: &SharedState, client_id: ClientId) 
     let peers = state.peers_in_shared_channels(client_id).await;
     if let Some(ref client) = client {
         let quit_msg = IrcMessage::quit(Some("Connection closed")).with_prefix(client.prefix());
+        let line: Arc<str> = quit_msg.serialize().into();
         for peer in &peers {
-            peer.send_message(&quit_msg);
+            peer.send_line(&line);
         }
     }
 

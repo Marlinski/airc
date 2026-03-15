@@ -3,7 +3,6 @@
 //! Endpoints:
 //! - `GET /api/stats`             — server statistics (users, channels, uptime)
 //! - `GET /api/channels`          — list of channels with details
-//! - `GET /api/reputation/:nick`  — reputation info for a registered nick
 //! - `GET /metrics`               — Prometheus exposition format
 //! - `GET /ws`                    — WebSocket upgrade for IRC-over-WebSocket
 
@@ -11,7 +10,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{ConnectInfo, Path, State, WebSocketUpgrade};
+use axum::extract::{ConnectInfo, State, WebSocketUpgrade};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json};
 use axum::routing::get;
@@ -25,9 +24,7 @@ use crate::state::SharedState;
 
 // Re-export the proto HTTP API types so `state.rs` can reference them
 // as `web::StatsResponse` etc. without needing a separate import.
-pub use airc_shared::http_api::{
-    ChannelInfo, ChannelsResponse, ErrorResponse, ReputationResponse, StatsResponse,
-};
+pub use airc_shared::http_api::{ChannelInfo, ChannelsResponse, StatsResponse};
 
 // ---------------------------------------------------------------------------
 // REST API handlers
@@ -41,21 +38,6 @@ async fn get_stats(State(state): State<Arc<SharedState>>) -> Json<StatsResponse>
 async fn get_channels(State(state): State<Arc<SharedState>>) -> Json<ChannelsResponse> {
     let channels = state.api_channels().await;
     Json(ChannelsResponse { channels })
-}
-
-async fn get_reputation(
-    State(state): State<Arc<SharedState>>,
-    Path(nick): Path<String>,
-) -> Result<Json<ReputationResponse>, (StatusCode, Json<ErrorResponse>)> {
-    match state.api_reputation(&nick).await {
-        Some(rep) => Ok(Json(rep)),
-        None => Err((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: format!("{nick} is not a registered nickname."),
-            }),
-        )),
-    }
 }
 
 /// Prometheus exposition format metrics.
@@ -128,7 +110,7 @@ async fn handle_ws_connection(
     let (mut ws_sink, mut ws_stream) = socket.split();
 
     // Channel for outgoing IRC lines (Connection → WebSocket).
-    let (tx, mut rx) = mpsc::channel::<String>(512);
+    let (tx, mut rx) = mpsc::channel::<Arc<str>>(512);
 
     // Pipe for incoming IRC lines (WebSocket → Connection).
     // We write incoming WS text frames (with \n appended) into `pipe_writer`;
@@ -138,7 +120,11 @@ async fn handle_ws_connection(
     // --- Writer task: drain outgoing mpsc and send as WS text frames ---
     let writer_handle = tokio::spawn(async move {
         while let Some(line) = rx.recv().await {
-            if ws_sink.send(Message::Text(line.into())).await.is_err() {
+            if ws_sink
+                .send(Message::Text(line.to_string().into()))
+                .await
+                .is_err()
+            {
                 break;
             }
         }
@@ -196,7 +182,6 @@ pub fn router(state: SharedState) -> Router {
     Router::new()
         .route("/api/stats", get(get_stats))
         .route("/api/channels", get(get_channels))
-        .route("/api/reputation/{nick}", get(get_reputation))
         .route("/metrics", get(get_metrics))
         .route("/ws", get(ws_upgrade))
         .with_state(shared)

@@ -14,6 +14,7 @@ mod ipc;
 
 use clap::{Parser, Subcommand};
 
+use airc_client::{DEFAULT_NICK, DEFAULT_SERVER, TlsMode};
 use airc_shared::ipc::ipc_request::Command;
 use airc_shared::ipc::ipc_response::Payload;
 
@@ -33,16 +34,24 @@ enum Commands {
     /// Connect to an IRC server (starts the daemon).
     Connect {
         /// Server address (host:port).
-        #[arg(default_value = "localhost:6667")]
+        #[arg(default_value = DEFAULT_SERVER)]
         server: String,
 
         /// Nickname to use.
-        #[arg(short, long, default_value = "agent")]
+        #[arg(short, long, default_value = DEFAULT_NICK)]
         nick: String,
 
         /// Channels to auto-join (comma-separated).
         #[arg(short, long)]
         join: Option<String>,
+
+        /// Require TLS (fail if TLS handshake fails).
+        #[arg(long, conflicts_with = "no_tls")]
+        tls: bool,
+
+        /// Disable TLS (plain TCP only).
+        #[arg(long, conflicts_with = "tls")]
+        no_tls: bool,
 
         /// Run in foreground (don't daemonize).
         #[arg(long, default_value_t = false)]
@@ -183,11 +192,21 @@ async fn main() {
             server,
             nick,
             join,
+            tls,
+            no_tls,
             foreground,
         } => {
             let auto_join: Vec<String> = join
                 .map(|j| j.split(',').map(|s| s.trim().to_string()).collect())
                 .unwrap_or_default();
+
+            let tls_mode = if tls {
+                TlsMode::Required
+            } else if no_tls {
+                TlsMode::Disabled
+            } else {
+                TlsMode::Preferred
+            };
 
             // If a session was explicitly provided via --session, use it.
             // Otherwise, check if an active session already exists in cwd
@@ -216,8 +235,15 @@ async fn main() {
                 ipc::generate_session_id()
             };
 
-            if let Err(e) =
-                daemon::start(session_id.clone(), server, nick, auto_join, foreground).await
+            if let Err(e) = daemon::start(
+                session_id.clone(),
+                server,
+                nick,
+                auto_join,
+                tls_mode,
+                foreground,
+            )
+            .await
             {
                 eprintln!("error: {e}");
                 std::process::exit(1);

@@ -217,6 +217,14 @@ impl IrcClient {
         self.say("NickServ", &format!("REGISTER {password}")).await
     }
 
+    // -- Operator helpers ----------------------------------------------------
+
+    /// Authenticate as an IRC operator via the `OPER` command.
+    pub async fn send_oper(&self, name: &str, password: &str) -> Result<(), ClientError> {
+        self.send_line(&IrcMessage::oper(name, password).serialize())
+            .await
+    }
+
     // -- Status / queries ----------------------------------------------------
 
     /// Get our current nickname.

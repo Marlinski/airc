@@ -12,14 +12,42 @@
 //!
 //! If both are set, `motd` takes precedence. If neither is set, the built-in
 //! default MOTD is used.
+//!
+//! ## TLS
+//!
+//! TLS is optional. Supply `tls_cert` and `tls_key` (PEM files) to enable it.
+//! The server will listen on `tls_bind` (default `0.0.0.0:6697`) in addition
+//! to the plain-text IRC port.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use serde::Deserialize;
+use tokio_rustls::TlsAcceptor;
 
 // ---------------------------------------------------------------------------
 // TOML file schema
 // ---------------------------------------------------------------------------
+
+/// An IRC operator entry.
+///
+/// Configured in TOML as:
+/// ```toml
+/// [[operators]]
+/// name = "services"
+/// password = "secret"
+/// service = true
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+pub struct OperatorEntry {
+    /// Operator name (used as the first parameter to `OPER`).
+    pub name: String,
+    /// Plain-text password (used as the second parameter to `OPER`).
+    pub password: String,
+    /// If `true`, the user receives `+S` (service) mode in addition to `+o`.
+    #[serde(default)]
+    pub service: bool,
+}
 
 /// Deserialized representation of `aircd.toml`.
 ///
@@ -39,6 +67,15 @@ struct ConfigFile {
     motd: Option<Vec<String>>,
     /// Path to a MOTD file (alternative to inline `motd`).
     motd_file: Option<String>,
+    /// Path to PEM certificate file for TLS.
+    tls_cert: Option<String>,
+    /// Path to PEM private key file for TLS.
+    tls_key: Option<String>,
+    /// TLS bind address (default `0.0.0.0:6697`).
+    tls_bind: Option<String>,
+    /// IRC operator accounts.
+    #[serde(default)]
+    operators: Vec<OperatorEntry>,
 }
 
 // ---------------------------------------------------------------------------
@@ -58,6 +95,14 @@ pub struct ServerConfig {
     pub log_dir: Option<String>,
     /// Lines displayed to clients upon connection as the Message of the Day.
     pub motd: Vec<String>,
+    /// Path to PEM certificate file for TLS. `None` disables TLS.
+    pub tls_cert: Option<String>,
+    /// Path to PEM private key file for TLS.
+    pub tls_key: Option<String>,
+    /// Address to bind the TLS listener to (e.g. `0.0.0.0:6697`).
+    pub tls_bind: Option<String>,
+    /// IRC operator accounts.
+    pub operators: Vec<OperatorEntry>,
 }
 
 impl Default for ServerConfig {
@@ -68,6 +113,10 @@ impl Default for ServerConfig {
             http_port: 8080,
             log_dir: None,
             motd: default_motd(),
+            tls_cert: None,
+            tls_key: None,
+            tls_bind: None,
+            operators: Vec::new(),
         }
     }
 }
@@ -113,6 +162,9 @@ pub struct CliOverrides {
     pub name: Option<String>,
     pub http_port: Option<u16>,
     pub log_dir: Option<String>,
+    pub tls_cert: Option<String>,
+    pub tls_key: Option<String>,
+    pub tls_bind: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -139,6 +191,20 @@ impl ServerConfig {
             }
             if let Some(v) = f.log_dir {
                 cfg.log_dir = Some(v);
+            }
+            if let Some(v) = f.tls_cert {
+                cfg.tls_cert = Some(v);
+            }
+            if let Some(v) = f.tls_key {
+                cfg.tls_key = Some(v);
+            }
+            if let Some(v) = f.tls_bind {
+                cfg.tls_bind = Some(v);
+            }
+
+            // Operators (only from config file — no env/CLI override for lists).
+            if !f.operators.is_empty() {
+                cfg.operators = f.operators;
             }
 
             // MOTD: inline takes precedence over file path.
@@ -173,6 +239,15 @@ impl ServerConfig {
         if let Ok(v) = std::env::var("AIRCD_LOG_DIR") {
             cfg.log_dir = Some(v);
         }
+        if let Ok(v) = std::env::var("AIRCD_TLS_CERT") {
+            cfg.tls_cert = Some(v);
+        }
+        if let Ok(v) = std::env::var("AIRCD_TLS_KEY") {
+            cfg.tls_key = Some(v);
+        }
+        if let Ok(v) = std::env::var("AIRCD_TLS_BIND") {
+            cfg.tls_bind = Some(v);
+        }
 
         // Layer 4: CLI flags (only override if explicitly provided).
         if let Some(v) = cli.bind {
@@ -187,8 +262,59 @@ impl ServerConfig {
         if let Some(v) = cli.log_dir {
             cfg.log_dir = Some(v);
         }
+        if let Some(v) = cli.tls_cert {
+            cfg.tls_cert = Some(v);
+        }
+        if let Some(v) = cli.tls_key {
+            cfg.tls_key = Some(v);
+        }
+        if let Some(v) = cli.tls_bind {
+            cfg.tls_bind = Some(v);
+        }
 
         cfg
+    }
+
+    /// Returns `true` if TLS is configured (both cert and key are set).
+    pub fn tls_enabled(&self) -> bool {
+        self.tls_cert.is_some() && self.tls_key.is_some()
+    }
+
+    /// Returns the TLS bind address, defaulting to `0.0.0.0:6697`.
+    pub fn tls_bind_addr(&self) -> &str {
+        self.tls_bind.as_deref().unwrap_or("0.0.0.0:6697")
+    }
+
+    /// Build a [`TlsAcceptor`] from the configured cert and key files.
+    ///
+    /// Returns `None` if TLS is not configured. Exits with an error if the
+    /// cert/key files cannot be read or parsed.
+    pub fn tls_acceptor(&self) -> Option<TlsAcceptor> {
+        let (cert_path, key_path) = match (&self.tls_cert, &self.tls_key) {
+            (Some(c), Some(k)) => (c, k),
+            (Some(_), None) => {
+                eprintln!("error: tls_cert is set but tls_key is missing");
+                std::process::exit(1);
+            }
+            (None, Some(_)) => {
+                eprintln!("error: tls_key is set but tls_cert is missing");
+                std::process::exit(1);
+            }
+            (None, None) => return None,
+        };
+
+        let certs = load_certs(cert_path);
+        let key = load_private_key(key_path);
+
+        let config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .unwrap_or_else(|e| {
+                eprintln!("error: invalid TLS configuration: {e}");
+                std::process::exit(1);
+            });
+
+        Some(TlsAcceptor::from(Arc::new(config)))
     }
 }
 
@@ -229,4 +355,41 @@ fn load_config_file(path: Option<&str>) -> Option<ConfigFile> {
             std::process::exit(1);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// TLS helpers
+// ---------------------------------------------------------------------------
+
+/// Load PEM-encoded certificates from a file.
+fn load_certs(path: &str) -> Vec<rustls::pki_types::CertificateDer<'static>> {
+    let file = std::fs::File::open(path).unwrap_or_else(|e| {
+        eprintln!("error: cannot open TLS certificate file {path}: {e}");
+        std::process::exit(1);
+    });
+    let mut reader = std::io::BufReader::new(file);
+    rustls_pemfile::certs(&mut reader)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_or_else(|e| {
+            eprintln!("error: cannot parse TLS certificate file {path}: {e}");
+            std::process::exit(1);
+        })
+}
+
+/// Load the first PEM-encoded private key from a file.
+fn load_private_key(path: &str) -> rustls::pki_types::PrivateKeyDer<'static> {
+    let file = std::fs::File::open(path).unwrap_or_else(|e| {
+        eprintln!("error: cannot open TLS key file {path}: {e}");
+        std::process::exit(1);
+    });
+    let mut reader = std::io::BufReader::new(file);
+    rustls_pemfile::private_key(&mut reader)
+        .unwrap_or_else(|e| {
+            eprintln!("error: cannot parse TLS key file {path}: {e}");
+            std::process::exit(1);
+        })
+        .unwrap_or_else(|| {
+            eprintln!("error: no private key found in {path}");
+            std::process::exit(1);
+        })
 }

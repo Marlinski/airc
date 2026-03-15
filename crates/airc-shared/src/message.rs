@@ -96,6 +96,12 @@ pub enum Command {
     /// `FRIEND` — manage the server-side friend list (+nick / -nick / list).
     Friend,
 
+    // -- Operator -----------------------------------------------------------
+    /// `OPER` — authenticate as an IRC operator.
+    Oper,
+    /// `KILL` — forcibly disconnect a user (operator/service command).
+    Kill,
+
     // -- Server -------------------------------------------------------------
     /// `PING` — keepalive ping.
     Ping,
@@ -147,6 +153,8 @@ impl Command {
             "AWAY" => Command::Away,
             "SILENCE" => Command::Silence,
             "FRIEND" => Command::Friend,
+            "OPER" => Command::Oper,
+            "KILL" => Command::Kill,
             "PING" => Command::Ping,
             "PONG" => Command::Pong,
             "MOTD" => Command::Motd,
@@ -178,6 +186,8 @@ impl fmt::Display for Command {
             Command::Away => f.write_str("AWAY"),
             Command::Silence => f.write_str("SILENCE"),
             Command::Friend => f.write_str("FRIEND"),
+            Command::Oper => f.write_str("OPER"),
+            Command::Kill => f.write_str("KILL"),
             Command::Ping => f.write_str("PING"),
             Command::Pong => f.write_str("PONG"),
             Command::Motd => f.write_str("MOTD"),
@@ -394,6 +404,41 @@ impl IrcMessage {
             prefix: None,
             command: Command::Pass,
             params: vec![password.to_string()],
+        }
+    }
+
+    /// Create an `OPER` message.
+    ///
+    /// ```
+    /// use airc_shared::IrcMessage;
+    /// let msg = IrcMessage::oper("admin", "secret");
+    /// assert_eq!(msg.serialize(), "OPER admin secret");
+    /// ```
+    pub fn oper(name: &str, password: &str) -> Self {
+        IrcMessage {
+            prefix: None,
+            command: Command::Oper,
+            params: vec![name.to_string(), password.to_string()],
+        }
+    }
+
+    /// Create a `KILL` message.
+    ///
+    /// `KILL <nick> :<reason>` — forcibly disconnect a user.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use airc_shared::IrcMessage;
+    ///
+    /// let msg = IrcMessage::kill("baduser", "Spamming the channel");
+    /// assert_eq!(msg.serialize(), "KILL baduser :Spamming the channel");
+    /// ```
+    pub fn kill(nick: &str, reason: &str) -> Self {
+        IrcMessage {
+            prefix: None,
+            command: Command::Kill,
+            params: vec![nick.to_string(), reason.to_string()],
         }
     }
 

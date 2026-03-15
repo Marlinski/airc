@@ -107,6 +107,13 @@ pub const RPL_MOTDSTART: u16 = 375;
 pub const RPL_ENDOFMOTD: u16 = 376;
 
 // ===========================================================================
+// OPER (381)
+// ===========================================================================
+
+/// `381` — You are now an IRC operator.
+pub const RPL_YOUREOPER: u16 = 381;
+
+// ===========================================================================
 // Channel mode (324)
 // ===========================================================================
 
@@ -152,6 +159,8 @@ pub const ERR_NOTREGISTERED: u16 = 451;
 pub const ERR_NEEDMOREPARAMS: u16 = 461;
 /// `462` — Already registered.
 pub const ERR_ALREADYREGISTERED: u16 = 462;
+/// `464` — Password incorrect (OPER).
+pub const ERR_PASSWDMISMATCH: u16 = 464;
 /// `471` — Cannot join channel (+l) — channel is full.
 pub const ERR_CHANNELISFULL: u16 = 471;
 /// `473` — Cannot join channel (+i) — invite only.
@@ -160,8 +169,12 @@ pub const ERR_INVITEONLYCHAN: u16 = 473;
 pub const ERR_BANNEDFROMCHAN: u16 = 474;
 /// `475` — Cannot join channel (bad key).
 pub const ERR_BADCHANNELKEY: u16 = 475;
+/// `481` — Permission Denied- You're not an IRC operator.
+pub const ERR_NOPRIVILEGES: u16 = 481;
 /// `482` — You're not channel operator.
 pub const ERR_CHANOPRIVSNEEDED: u16 = 482;
+/// `491` — No O-lines for your host.
+pub const ERR_NOOPERHOST: u16 = 491;
 
 // ===========================================================================
 // Helper
@@ -232,6 +245,9 @@ pub fn reply_name(code: u16) -> &'static str {
         375 => "RPL_MOTDSTART",
         376 => "RPL_ENDOFMOTD",
 
+        // OPER
+        381 => "RPL_YOUREOPER",
+
         // Errors
         401 => "ERR_NOSUCHNICK",
         403 => "ERR_NOSUCHCHANNEL",
@@ -247,11 +263,14 @@ pub fn reply_name(code: u16) -> &'static str {
         451 => "ERR_NOTREGISTERED",
         461 => "ERR_NEEDMOREPARAMS",
         462 => "ERR_ALREADYREGISTERED",
+        464 => "ERR_PASSWDMISMATCH",
         471 => "ERR_CHANNELISFULL",
         473 => "ERR_INVITEONLYCHAN",
         474 => "ERR_BANNEDFROMCHAN",
         475 => "ERR_BADCHANNELKEY",
+        481 => "ERR_NOPRIVILEGES",
         482 => "ERR_CHANOPRIVSNEEDED",
+        491 => "ERR_NOOPERHOST",
 
         _ => "UNKNOWN",
     }
@@ -314,11 +333,15 @@ mod tests {
         assert_eq!(ERR_NOTREGISTERED, 451);
         assert_eq!(ERR_NEEDMOREPARAMS, 461);
         assert_eq!(ERR_ALREADYREGISTERED, 462);
+        assert_eq!(ERR_PASSWDMISMATCH, 464);
         assert_eq!(ERR_CHANNELISFULL, 471);
         assert_eq!(ERR_INVITEONLYCHAN, 473);
         assert_eq!(ERR_BANNEDFROMCHAN, 474);
         assert_eq!(ERR_BADCHANNELKEY, 475);
+        assert_eq!(ERR_NOPRIVILEGES, 481);
         assert_eq!(ERR_CHANOPRIVSNEEDED, 482);
+        assert_eq!(ERR_NOOPERHOST, 491);
+        assert_eq!(RPL_YOUREOPER, 381);
     }
 
     #[test]
@@ -375,6 +398,7 @@ mod tests {
             RPL_MOTD,
             RPL_MOTDSTART,
             RPL_ENDOFMOTD,
+            RPL_YOUREOPER,
             ERR_NOSUCHNICK,
             ERR_NOSUCHCHANNEL,
             ERR_CANNOTSENDTOCHAN,
@@ -389,11 +413,14 @@ mod tests {
             ERR_NOTREGISTERED,
             ERR_NEEDMOREPARAMS,
             ERR_ALREADYREGISTERED,
+            ERR_PASSWDMISMATCH,
             ERR_CHANNELISFULL,
             ERR_INVITEONLYCHAN,
             ERR_BANNEDFROMCHAN,
             ERR_BADCHANNELKEY,
+            ERR_NOPRIVILEGES,
             ERR_CHANOPRIVSNEEDED,
+            ERR_NOOPERHOST,
         ];
         for code in codes {
             assert_ne!(

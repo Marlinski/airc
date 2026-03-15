@@ -17,3 +17,11 @@
 
 # Session sockets
 .airc-*.sock
+
+# Node.js
+node_modules/
+dist/
+
+# Persistence files (runtime data)
+nickserv.json
+chanserv.json

@@ -1,19 +1,22 @@
-//! Low-level IRC connection: TCP reader/writer tasks.
+//! Low-level IRC connection: TCP/TLS reader/writer tasks.
 //!
-//! Handles splitting a TCP stream into a line reader and a line writer,
-//! automatic PONG responses, and dispatching parsed messages to the state
-//! tracker.
+//! Handles establishing a TCP (or TLS) connection, splitting it into a
+//! line reader and a line writer, automatic PONG responses, and
+//! dispatching parsed messages to the state tracker.
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use std::sync::Arc;
+
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tokio_rustls::TlsConnector;
 use tracing::{debug, error, info, warn};
 
 use airc_shared::reply::*;
 use airc_shared::validate::is_channel_name;
 use airc_shared::{Command, IrcMessage, Prefix};
 
-use crate::config::ClientConfig;
+use crate::config::{ClientConfig, TlsMode};
 use crate::error::ClientError;
 use crate::event::{IrcEvent, MessageKind, new_channel_message};
 use crate::state::ClientState;
@@ -24,7 +27,27 @@ pub type LineSender = mpsc::Sender<String>;
 /// Receiver for high-level IRC events.
 pub type EventReceiver = mpsc::Receiver<IrcEvent>;
 
-/// Establish a TCP connection and spawn reader/writer tasks.
+/// Build a `rustls` TLS connector using system root certificates.
+fn tls_connector() -> TlsConnector {
+    let root_store =
+        rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let tls_config = rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+    TlsConnector::from(Arc::new(tls_config))
+}
+
+/// Extract the hostname from a `host:port` address string.
+fn extract_host(addr: &str) -> &str {
+    // Handle [IPv6]:port
+    if let Some(bracket_end) = addr.find(']') {
+        return &addr[..=bracket_end];
+    }
+    // host:port
+    addr.rsplit_once(':').map_or(addr, |(host, _)| host)
+}
+
+/// Establish a connection (TLS or plain TCP) and spawn reader/writer tasks.
 ///
 /// Returns:
 /// - A `LineSender` for sending raw IRC lines
@@ -33,10 +56,7 @@ pub type EventReceiver = mpsc::Receiver<IrcEvent>;
 pub async fn connect(
     config: &ClientConfig,
 ) -> Result<(LineSender, EventReceiver, ClientState), ClientError> {
-    info!(addr = %config.server_addr, nick = %config.nick, "connecting to IRC server");
-
-    let stream = TcpStream::connect(&config.server_addr).await?;
-    let (reader, writer) = stream.into_split();
+    info!(addr = %config.server_addr, nick = %config.nick, tls = ?config.tls, "connecting to IRC server");
 
     let state = ClientState::new(config.nick.clone(), config.buffer_size);
 
@@ -46,14 +66,68 @@ pub async fn connect(
     // Channel for parsed events: reader task -> caller.
     let (event_tx, event_rx) = mpsc::channel::<IrcEvent>(512);
 
-    // Spawn writer task.
-    let writer_tx = line_tx.clone();
-    tokio::spawn(write_loop(writer, line_rx));
-
-    // Spawn reader task.
-    let reader_state = state.clone();
-    let reader_line_tx = writer_tx.clone();
-    tokio::spawn(read_loop(reader, reader_line_tx, event_tx, reader_state));
+    match config.tls {
+        TlsMode::Required => {
+            let tls_stream = establish_tls(&config.server_addr).await?;
+            let (reader, writer) = tokio::io::split(tls_stream);
+            spawn_io_tasks(
+                reader,
+                writer,
+                line_tx.clone(),
+                line_rx,
+                event_tx,
+                state.clone(),
+            );
+        }
+        TlsMode::Preferred => {
+            // Try TLS first; fall back to plain TCP on failure.
+            match establish_tls(&config.server_addr).await {
+                Ok(tls_stream) => {
+                    let (reader, writer) = tokio::io::split(tls_stream);
+                    spawn_io_tasks(
+                        reader,
+                        writer,
+                        line_tx.clone(),
+                        line_rx,
+                        event_tx,
+                        state.clone(),
+                    );
+                }
+                Err(tls_err) => {
+                    info!(
+                        error = %tls_err,
+                        "TLS connection failed, falling back to plain TCP"
+                    );
+                    // Derive the plain-text address: replace port with 6667.
+                    let plain_addr = fallback_plain_addr(&config.server_addr);
+                    let tcp_stream = TcpStream::connect(&plain_addr).await?;
+                    info!(addr = %plain_addr, "plain TCP connection established (fallback)");
+                    let (reader, writer) = tokio::io::split(tcp_stream);
+                    spawn_io_tasks(
+                        reader,
+                        writer,
+                        line_tx.clone(),
+                        line_rx,
+                        event_tx,
+                        state.clone(),
+                    );
+                }
+            }
+        }
+        TlsMode::Disabled => {
+            let tcp_stream = TcpStream::connect(&config.server_addr).await?;
+            info!(addr = %config.server_addr, "plain TCP connection established");
+            let (reader, writer) = tokio::io::split(tcp_stream);
+            spawn_io_tasks(
+                reader,
+                writer,
+                line_tx.clone(),
+                line_rx,
+                event_tx,
+                state.clone(),
+            );
+        }
+    }
 
     // Send registration sequence.
     if let Some(ref pass) = config.password {
@@ -69,8 +143,63 @@ pub async fn connect(
     Ok((line_tx, event_rx, state))
 }
 
-/// Writer task: drains the line channel and writes to the TCP socket.
-async fn write_loop(mut writer: tokio::net::tcp::OwnedWriteHalf, mut rx: mpsc::Receiver<String>) {
+/// Establish a TLS connection over TCP. Returns the TLS stream.
+async fn establish_tls(
+    addr: &str,
+) -> Result<tokio_rustls::client::TlsStream<TcpStream>, ClientError> {
+    let tcp_stream = TcpStream::connect(addr).await?;
+    let host = extract_host(addr);
+    let server_name = rustls::pki_types::ServerName::try_from(host.to_string())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+
+    let connector = tls_connector();
+    let tls_stream = connector
+        .connect(server_name, tcp_stream)
+        .await
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::ConnectionRefused, e))?;
+
+    info!(addr = %addr, "TLS connection established");
+    Ok(tls_stream)
+}
+
+/// Derive the plain-text fallback address from a TLS address.
+///
+/// Replaces the port with 6667 (standard IRC plain-text port).
+/// If the address has no port, appends `:6667`.
+fn fallback_plain_addr(addr: &str) -> String {
+    // Handle [IPv6]:port
+    if let Some(bracket_end) = addr.find(']') {
+        if addr[bracket_end..].contains(':') {
+            // [::1]:6697 -> [::1]:6667
+            return format!("{}:6667", &addr[..=bracket_end]);
+        }
+        return format!("{addr}:6667");
+    }
+    // host:port
+    match addr.rsplit_once(':') {
+        Some((host, _port)) => format!("{host}:6667"),
+        None => format!("{addr}:6667"),
+    }
+}
+
+/// Spawn the reader and writer background tasks for any `AsyncRead + AsyncWrite` stream.
+fn spawn_io_tasks<R, W>(
+    reader: R,
+    writer: W,
+    line_tx: LineSender,
+    line_rx: mpsc::Receiver<String>,
+    event_tx: mpsc::Sender<IrcEvent>,
+    state: ClientState,
+) where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    tokio::spawn(write_loop(writer, line_rx));
+    tokio::spawn(read_loop(reader, line_tx, event_tx, state));
+}
+
+/// Writer task: drains the line channel and writes to the stream.
+async fn write_loop<W: AsyncWrite + Unpin>(mut writer: W, mut rx: mpsc::Receiver<String>) {
     while let Some(line) = rx.recv().await {
         debug!(line = %line, "-> sending");
         let data = format!("{line}\r\n");
@@ -82,10 +211,10 @@ async fn write_loop(mut writer: tokio::net::tcp::OwnedWriteHalf, mut rx: mpsc::R
     debug!("writer task exiting");
 }
 
-/// Reader task: reads lines from the TCP socket, parses them, updates state,
+/// Reader task: reads lines from the stream, parses them, updates state,
 /// and emits events.
-async fn read_loop(
-    reader: tokio::net::tcp::OwnedReadHalf,
+async fn read_loop<R: AsyncRead + Unpin>(
+    reader: R,
     line_tx: LineSender,
     event_tx: mpsc::Sender<IrcEvent>,
     state: ClientState,

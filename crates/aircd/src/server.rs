@@ -1,7 +1,8 @@
 //! TCP accept loop — the heart of the AIRC server.
 
 use tokio::net::TcpListener;
-use tracing::{error, info};
+use tokio_rustls::TlsAcceptor;
+use tracing::{error, info, warn};
 
 use crate::connection::Connection;
 use crate::ipc;
@@ -10,11 +11,15 @@ use crate::state::SharedState;
 /// The AIRC IRC server.
 pub struct Server {
     state: SharedState,
+    tls_acceptor: Option<TlsAcceptor>,
 }
 
 impl Server {
-    pub fn new(state: SharedState) -> Self {
-        Self { state }
+    pub fn new(state: SharedState, tls_acceptor: Option<TlsAcceptor>) -> Self {
+        Self {
+            state,
+            tls_acceptor,
+        }
     }
 
     /// Bind and run the server. This function runs until the process is shut down.
@@ -22,7 +27,17 @@ impl Server {
         let addr = &self.state.config().bind_addr;
         let listener = TcpListener::bind(addr).await?;
 
-        info!(addr = %addr, name = %self.state.server_name(), "AIRC server listening");
+        info!(addr = %addr, name = %self.state.server_name(), "AIRC server listening (plaintext)");
+
+        // Optionally bind the TLS listener.
+        let tls_listener = if self.tls_acceptor.is_some() {
+            let tls_addr = self.state.config().tls_bind_addr().to_string();
+            let tls_listener = TcpListener::bind(&tls_addr).await?;
+            info!(addr = %tls_addr, "AIRC server listening (TLS)");
+            Some(tls_listener)
+        } else {
+            None
+        };
 
         // Start the IPC listener for `aircd stop` / `aircd status` commands.
         let (mut ipc_rx, ipc_sock_path) = match ipc::start_listener(self.state.clone()) {
@@ -43,6 +58,9 @@ impl Server {
                     result = listener.accept() => {
                         match result {
                             Ok((stream, peer_addr)) => {
+                                // Disable Nagle's algorithm for low-latency delivery.
+                                let _ = stream.set_nodelay(true);
+
                                 let id = self.state.next_client_id();
                                 let hostname = peer_addr.ip().to_string();
                                 info!(client_id = %id, peer = %peer_addr, "new connection");
@@ -54,6 +72,42 @@ impl Server {
                             }
                             Err(e) => {
                                 error!(error = %e, "failed to accept connection");
+                            }
+                        }
+                    }
+
+                    // TLS accept (only active if TLS is configured).
+                    result = async {
+                        match (&tls_listener, &self.tls_acceptor) {
+                            (Some(l), Some(_)) => l.accept().await,
+                            _ => std::future::pending().await,
+                        }
+                    } => {
+                        match result {
+                            Ok((stream, peer_addr)) => {
+                                // Disable Nagle's algorithm for low-latency delivery.
+                                let _ = stream.set_nodelay(true);
+
+                                let acceptor = self.tls_acceptor.clone().unwrap();
+                                let id = self.state.next_client_id();
+                                let hostname = peer_addr.ip().to_string();
+                                info!(client_id = %id, peer = %peer_addr, "new TLS connection");
+
+                                let state = self.state.clone();
+                                tokio::spawn(async move {
+                                    match acceptor.accept(stream).await {
+                                        Ok(tls_stream) => {
+                                            let conn = Connection::new(id, state, hostname);
+                                            conn.run_tls(tls_stream).await;
+                                        }
+                                        Err(e) => {
+                                            warn!(client_id = %id, error = %e, "TLS handshake failed");
+                                        }
+                                    }
+                                });
+                            }
+                            Err(e) => {
+                                error!(error = %e, "failed to accept TLS connection");
                             }
                         }
                     }

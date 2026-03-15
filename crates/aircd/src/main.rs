@@ -17,7 +17,6 @@ mod handler;
 mod ipc;
 mod logger;
 mod server;
-mod services;
 mod state;
 mod web;
 
@@ -72,6 +71,18 @@ enum Commands {
         /// Directory for channel log files (CSV). Logging is disabled if omitted.
         #[arg(long)]
         log_dir: Option<String>,
+
+        /// Path to PEM certificate file for TLS.
+        #[arg(long)]
+        tls_cert: Option<String>,
+
+        /// Path to PEM private key file for TLS.
+        #[arg(long)]
+        tls_key: Option<String>,
+
+        /// TLS bind address (default 0.0.0.0:6697).
+        #[arg(long)]
+        tls_bind: Option<String>,
     },
 
     /// Stop the running server.
@@ -143,6 +154,9 @@ fn cmd_start(cfg: ServerConfig, foreground: bool) {
     // Pre-flight: check that required ports are free.
     check_port_available(&cfg.bind_addr, "IRC");
     check_port_available(&format!("0.0.0.0:{}", cfg.http_port), "HTTP API");
+    if cfg.tls_enabled() {
+        check_port_available(cfg.tls_bind_addr(), "IRC TLS");
+    }
 
     // Daemonize: re-exec ourselves with --foreground.
     let exe = std::env::current_exe().unwrap_or_else(|e| {
@@ -172,6 +186,15 @@ fn cmd_start(cfg: ServerConfig, foreground: bool) {
         if let Some(ref dir) = cfg.log_dir {
             cmd.arg("--log-dir").arg(dir);
         }
+        if let Some(ref cert) = cfg.tls_cert {
+            cmd.arg("--tls-cert").arg(cert);
+        }
+        if let Some(ref key) = cfg.tls_key {
+            cmd.arg("--tls-key").arg(key);
+        }
+        if let Some(ref bind) = cfg.tls_bind {
+            cmd.arg("--tls-bind").arg(bind);
+        }
         cmd.env(
             "RUST_LOG",
             std::env::var("RUST_LOG").unwrap_or("info".to_string()),
@@ -190,6 +213,9 @@ fn cmd_start(cfg: ServerConfig, foreground: bool) {
             });
             println!("server started (pid {pid})");
             println!("  irc:  {}", cfg.bind_addr);
+            if cfg.tls_enabled() {
+                println!("  tls:  {}", cfg.tls_bind_addr());
+            }
             println!("  http: 0.0.0.0:{}", cfg.http_port);
             println!("  ws:   ws://0.0.0.0:{}/ws", cfg.http_port);
             println!("  log:  {}", log_file_path.display());
@@ -231,6 +257,9 @@ fn run_server_foreground(cfg: ServerConfig) {
         )
         .init();
 
+    // Build TLS acceptor from config (if TLS is configured).
+    let tls_acceptor = cfg.tls_acceptor();
+
     let http_port = cfg.http_port;
 
     let rt = tokio::runtime::Runtime::new().unwrap_or_else(|e| {
@@ -252,7 +281,7 @@ fn run_server_foreground(cfg: ServerConfig) {
         });
 
         // Start IRC server (blocks until shutdown signal).
-        let srv = server::Server::new(state);
+        let srv = server::Server::new(state, tls_acceptor);
         if let Err(e) = srv.run().await {
             tracing::error!(error = %e, "IRC server failed");
             std::process::exit(1);
@@ -594,6 +623,9 @@ fn main() {
             http_port,
             foreground,
             log_dir,
+            tls_cert,
+            tls_key,
+            tls_bind,
         } => {
             let cfg = ServerConfig::load(
                 config_path.as_deref(),
@@ -602,6 +634,9 @@ fn main() {
                     name,
                     http_port,
                     log_dir,
+                    tls_cert,
+                    tls_key,
+                    tls_bind,
                 },
             );
             cmd_start(cfg, foreground);

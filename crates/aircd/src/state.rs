@@ -3,7 +3,7 @@
 //! All mutations flow through [`SharedState`] methods so the interface can be
 //! extracted into a trait later for testing or alternative backends.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,7 +19,6 @@ use crate::channel::Channel;
 use crate::client::{ClientHandle, ClientId, ClientInfo};
 use crate::config::ServerConfig;
 use crate::logger::ChannelLogger;
-use crate::services::ServiceRouter;
 use crate::web;
 
 // ---------------------------------------------------------------------------
@@ -45,13 +44,10 @@ struct Inner {
     nick_to_id: RwLock<HashMap<String, ClientId>>,
     /// Per-client silence lists: key = silencer, value = map of silenced client ID → optional reason.
     silence_lists: RwLock<HashMap<ClientId, HashMap<ClientId, Option<String>>>>,
-    /// Per-client friend lists: key = befriender, value = set of friended client IDs.
-    friend_lists: RwLock<HashMap<ClientId, HashSet<ClientId>>>,
     /// Per-client away messages. Absent = not away.
     away_messages: RwLock<HashMap<ClientId, String>>,
     next_id: AtomicU64,
     config: ServerConfig,
-    services: ServiceRouter,
     logger: ChannelLogger,
     started_at: Instant,
 }
@@ -76,11 +72,9 @@ impl SharedState {
                 channels: RwLock::new(HashMap::new()),
                 nick_to_id: RwLock::new(HashMap::new()),
                 silence_lists: RwLock::new(HashMap::new()),
-                friend_lists: RwLock::new(HashMap::new()),
                 away_messages: RwLock::new(HashMap::new()),
                 next_id: AtomicU64::new(1),
                 config,
-                services: ServiceRouter::new(),
                 logger: ChannelLogger::new(log_dir),
                 started_at: Instant::now(),
             }),
@@ -102,11 +96,6 @@ impl SharedState {
     /// Borrow the full server config.
     pub fn config(&self) -> &ServerConfig {
         &self.inner.config
-    }
-
-    /// Access the service router (NickServ, ChanServ, etc.).
-    pub fn services(&self) -> &ServiceRouter {
-        &self.inner.services
     }
 
     /// Access the channel logger.
@@ -159,14 +148,6 @@ impl SharedState {
         }
         drop(silence);
 
-        // Clean up friend lists: same pattern.
-        let mut friends = self.inner.friend_lists.write().await;
-        friends.remove(&id);
-        for set in friends.values_mut() {
-            set.remove(&id);
-        }
-        drop(friends);
-
         // Clean up away status.
         self.inner.away_messages.write().await.remove(&id);
 
@@ -213,7 +194,10 @@ impl SharedState {
         if let Some(handle) = clients.get_mut(&id) {
             let old_lower = handle.info.nick.to_ascii_lowercase();
             nick_map.remove(&old_lower);
-            handle.info.nick = new_nick.to_string();
+            // Replace the Arc<ClientInfo> with a new one carrying the new nick.
+            let mut new_info = (*handle.info).clone();
+            new_info.nick = new_nick.to_string();
+            handle.info = Arc::new(new_info);
             nick_map.insert(new_lower, id);
         }
         Ok(())
@@ -231,7 +215,7 @@ impl SharedState {
         username: &str,
         realname: &str,
         hostname: &str,
-        tx: tokio::sync::mpsc::Sender<String>,
+        tx: tokio::sync::mpsc::Sender<Arc<str>>,
     ) -> Result<ClientHandle, NickError> {
         if !is_valid_nick(nick) {
             return Err(NickError::Invalid);
@@ -246,7 +230,7 @@ impl SharedState {
             }
         }
 
-        let info = ClientInfo {
+        let info = Arc::new(ClientInfo {
             nick: nick.to_string(),
             username: username.to_string(),
             realname: realname.to_string(),
@@ -254,9 +238,10 @@ impl SharedState {
             registered: true,
             identified: false,
             modes: String::new(),
-        };
+        });
 
-        let handle = ClientHandle::new(id, info, tx, self.server_name().to_string());
+        let server_name: Arc<str> = self.server_name().into();
+        let handle = ClientHandle::new(id, info, tx, server_name);
 
         self.inner.clients.write().await.insert(id, handle.clone());
         self.inner.nick_to_id.write().await.insert(nick_lower, id);
@@ -632,6 +617,27 @@ impl SharedState {
             .is_some_and(|map| map.contains_key(&sender))
     }
 
+    /// Check whether `sender` is silenced by any of the given recipients.
+    ///
+    /// Acquires the silence lock **once** and checks all recipients in a batch,
+    /// returning a set of recipient IDs that have silenced the sender.
+    pub async fn silenced_by_batch(
+        &self,
+        sender: ClientId,
+        recipients: &[ClientId],
+    ) -> std::collections::HashSet<ClientId> {
+        let silence = self.inner.silence_lists.read().await;
+        recipients
+            .iter()
+            .filter(|&&rid| {
+                silence
+                    .get(&rid)
+                    .is_some_and(|map| map.contains_key(&sender))
+            })
+            .copied()
+            .collect()
+    }
+
     /// Get the map of silenced client IDs → optional reasons for `silencer`.
     pub async fn get_silence_list(&self, silencer: ClientId) -> HashMap<ClientId, Option<String>> {
         self.inner
@@ -639,44 +645,6 @@ impl SharedState {
             .read()
             .await
             .get(&silencer)
-            .cloned()
-            .unwrap_or_default()
-    }
-
-    // -- Friend management ---------------------------------------------------
-
-    /// Add `target` to `befriender`'s friend list.
-    pub async fn add_friend(&self, befriender: ClientId, target: ClientId) {
-        self.inner
-            .friend_lists
-            .write()
-            .await
-            .entry(befriender)
-            .or_default()
-            .insert(target);
-    }
-
-    /// Remove `target` from `befriender`'s friend list. Returns `true` if it was present.
-    pub async fn remove_friend(&self, befriender: ClientId, target: ClientId) -> bool {
-        let mut lists = self.inner.friend_lists.write().await;
-        if let Some(set) = lists.get_mut(&befriender) {
-            let removed = set.remove(&target);
-            if set.is_empty() {
-                lists.remove(&befriender);
-            }
-            removed
-        } else {
-            false
-        }
-    }
-
-    /// Get the set of client IDs that `befriender` currently has as friends.
-    pub async fn get_friend_list(&self, befriender: ClientId) -> HashSet<ClientId> {
-        self.inner
-            .friend_lists
-            .read()
-            .await
-            .get(&befriender)
             .cloned()
             .unwrap_or_default()
     }
@@ -696,6 +664,32 @@ impl SharedState {
     /// Get a client's away message, if set.
     pub async fn get_away_message(&self, id: ClientId) -> Option<String> {
         self.inner.away_messages.read().await.get(&id).cloned()
+    }
+
+    // -- User mode management ------------------------------------------------
+
+    /// Add a user mode flag to a client (e.g. `'o'`, `'S'`).
+    pub async fn add_user_mode(&self, id: ClientId, flag: char) {
+        if let Some(handle) = self.inner.clients.write().await.get_mut(&id) {
+            handle.info = Arc::new(handle.info.with_mode(flag));
+        }
+    }
+
+    /// Get the user mode string for a client (e.g. `"+oS"`).
+    pub async fn user_mode_string(&self, id: ClientId) -> String {
+        self.inner
+            .clients
+            .read()
+            .await
+            .get(&id)
+            .map(|h| {
+                if h.info.modes.is_empty() {
+                    "+".to_string()
+                } else {
+                    format!("+{}", h.info.modes)
+                }
+            })
+            .unwrap_or_else(|| "+".to_string())
     }
 
     // -- Invite management --------------------------------------------------
@@ -751,7 +745,6 @@ impl SharedState {
         self.inner.nick_to_id.write().await.clear();
         self.inner.channels.write().await.clear();
         self.inner.silence_lists.write().await.clear();
-        self.inner.friend_lists.write().await.clear();
         self.inner.away_messages.write().await.clear();
     }
 
@@ -777,45 +770,18 @@ impl SharedState {
             let topic_text = ch.topic.as_ref().map(|(t, _, _)| t.clone());
             let modes = ch.modes.to_mode_string();
 
-            // Look up ChanServ registration for extra metadata.
-            let key = ch.name.to_ascii_lowercase();
-            let reg = self
-                .inner
-                .services
-                .chanserv
-                .get_registered_channel(&key)
-                .await;
-            let description = reg.as_ref().and_then(|r| r.description.clone());
-            let min_reputation = reg.map(|r| r.min_reputation);
-
             result.push(web::ChannelInfo {
                 name: ch.name.clone(),
                 topic: topic_text,
                 member_count: ch.member_count() as u64,
                 modes,
-                description,
-                min_reputation,
+                // TODO(phase2): Populate from ChanServ via service protocol extensions.
+                description: None,
+                min_reputation: None,
             });
         }
         result.sort_by(|a, b| a.name.cmp(&b.name));
         result
-    }
-
-    /// Reputation lookup for `GET /api/reputation/:nick`.
-    pub async fn api_reputation(&self, nick: &str) -> Option<web::ReputationResponse> {
-        let identity = self.inner.services.nickserv.get_identity(nick).await?;
-        let auth_method = if identity.pubkey_hex.is_some() {
-            "keypair"
-        } else {
-            "password"
-        };
-        Some(web::ReputationResponse {
-            nick: identity.nick,
-            reputation: identity.reputation,
-            registered_at: identity.registered_at,
-            auth_method: auth_method.to_string(),
-            capabilities: identity.capabilities,
-        })
     }
 
     // -- IPC queries --------------------------------------------------------
@@ -831,23 +797,14 @@ impl SharedState {
             let topic_text = ch.topic.as_ref().map(|(t, _, _)| t.clone());
             let modes = ch.modes.to_mode_string();
 
-            let key = ch.name.to_ascii_lowercase();
-            let reg = self
-                .inner
-                .services
-                .chanserv
-                .get_registered_channel(&key)
-                .await;
-            let description = reg.as_ref().and_then(|r| r.description.clone());
-            let min_reputation = reg.map(|r| r.min_reputation);
-
             channel_list.push(aircd_ipc::ChannelInfo {
                 name: ch.name.clone(),
                 topic: topic_text,
                 member_count: ch.member_count() as u64,
                 modes,
-                description,
-                min_reputation,
+                // TODO(phase2): Populate from ChanServ via service protocol extensions.
+                description: None,
+                min_reputation: None,
             });
         }
         drop(channels);

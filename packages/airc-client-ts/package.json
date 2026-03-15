@@ -1,0 +1,56 @@
+{
+  "name": "@airc/client",
+  "version": "0.1.0",
+  "description": "TypeScript IRC client for AIRC — connects to aircd over WebSocket",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run typecheck && npm run build && npm run test"
+  },
+  "keywords": [
+    "irc",
+    "airc",
+    "websocket",
+    "chat",
+    "agent",
+    "ai",
+    "bot",
+    "client"
+  ],
+  "author": "Marlinski",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Marlinski/airc.git",
+    "directory": "packages/airc-client-ts"
+  },
+  "homepage": "https://github.com/Marlinski/airc#readme",
+  "bugs": {
+    "url": "https://github.com/Marlinski/airc/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "tsup": "^8.0.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}

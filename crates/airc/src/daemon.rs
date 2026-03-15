@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use tokio::net::UnixListener;
 use tracing::{error, info};
 
-use airc_client::{IrcClient, IrcEvent};
+use airc_client::{IrcClient, IrcEvent, TlsMode};
 use airc_shared::ipc::ipc_request::Command;
 use airc_shared::log::{EventType, FileLogger, LogEvent, log_event_now};
 
@@ -84,11 +84,12 @@ pub async fn start(
     server: String,
     nick: String,
     auto_join: Vec<String>,
+    tls_mode: TlsMode,
     foreground: bool,
 ) -> Result<(), String> {
     if !foreground {
         // Fork into background using a pipe to relay the MOTD back.
-        return spawn_background(&session_id, &server, &nick, &auto_join);
+        return spawn_background(&session_id, &server, &nick, &auto_join, tls_mode);
     }
 
     // --- Foreground mode: this IS the daemon. ---
@@ -116,7 +117,9 @@ pub async fn start(
     }
 
     // Connect to IRC.
-    let config = airc_client::ClientConfig::new(&server, &nick).with_auto_join(auto_join);
+    let config = airc_client::ClientConfig::new(&server, &nick)
+        .with_auto_join(auto_join)
+        .with_tls(tls_mode);
 
     let (client, motd_lines, mut event_rx) = IrcClient::connect(config)
         .await
@@ -223,6 +226,7 @@ fn spawn_background(
     server: &str,
     nick: &str,
     auto_join: &[String],
+    tls_mode: TlsMode,
 ) -> Result<(), String> {
     // Create a pipe: child writes MOTD to fds[1], parent reads from fds[0].
     let mut fds = [0i32; 2];
@@ -244,6 +248,17 @@ fn spawn_background(
         .arg("--foreground");
     if !auto_join.is_empty() {
         cmd.arg("--join").arg(auto_join.join(","));
+    }
+    match tls_mode {
+        TlsMode::Required => {
+            cmd.arg("--tls");
+        }
+        TlsMode::Disabled => {
+            cmd.arg("--no-tls");
+        }
+        TlsMode::Preferred => {
+            // Default — no flag needed.
+        }
     }
 
     // Pass the pipe write fd number to the child via an env var.

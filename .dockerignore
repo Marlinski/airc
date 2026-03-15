@@ -1,0 +1,10 @@
+target/
+.git/
+.github/
+.opencode/
+.DS_Store
+*.swp
+*.swo
+*~
+packages/airc-client-ts/node_modules/
+packages/airc-client-ts/dist/
