@@ -16,9 +16,13 @@ mod connection;
 mod handler;
 mod ipc;
 mod logger;
+mod relay;
 mod server;
 mod state;
 mod web;
+
+#[cfg(test)]
+mod relay_tests;
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -249,6 +253,7 @@ fn cmd_start(cfg: ServerConfig, foreground: bool) {
 
 /// Run the AIRC server in the current process (foreground mode).
 fn run_server_foreground(cfg: ServerConfig) {
+    use std::sync::Arc;
     use tracing_subscriber::EnvFilter;
 
     tracing_subscriber::fmt()
@@ -262,13 +267,16 @@ fn run_server_foreground(cfg: ServerConfig) {
 
     let http_port = cfg.http_port;
 
+    // Construct the relay backend (NoopRelay for single-instance mode).
+    let relay: Arc<dyn relay::Relay> = Arc::new(relay::NoopRelay::new());
+
     let rt = tokio::runtime::Runtime::new().unwrap_or_else(|e| {
         eprintln!("failed to create tokio runtime: {e}");
         std::process::exit(1);
     });
 
     rt.block_on(async {
-        let state = state::SharedState::new(cfg);
+        let state = state::SharedState::new(cfg, relay);
         state.create_default_channels().await;
 
         // Start HTTP API server.

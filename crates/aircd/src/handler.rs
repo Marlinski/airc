@@ -10,7 +10,7 @@ use airc_shared::reply::*;
 use airc_shared::{Command, IrcMessage};
 use tracing::debug;
 
-use crate::client::ClientId;
+use crate::client::{ClientId, ClientKind};
 use crate::state::SharedState;
 
 /// Dispatch a parsed IRC command from a registered client.
@@ -34,7 +34,12 @@ pub async fn handle_command(state: &SharedState, client_id: ClientId, msg: &IrcM
         Command::Invite => handle_invite(state, client_id, msg).await,
         Command::Away => handle_away(state, client_id, msg).await,
         Command::Ison => handle_ison(state, client_id, msg).await,
-        Command::Silence => handle_silence(state, client_id, msg).await,
+        Command::Silence => {
+            // SILENCE is handled client-side via NickServ, not by the server.
+            if let Some(client) = state.get_client(client_id).await {
+                client.send_numeric(ERR_UNKNOWNCOMMAND, &["SILENCE", "Unknown command"]);
+            }
+        }
         Command::Motd => handle_motd(state, client_id).await,
         Command::Oper => handle_oper(state, client_id, msg).await,
         Command::Kill => handle_kill(state, client_id, msg).await,
@@ -85,6 +90,10 @@ async fn handle_nick(state: &SharedState, client_id: ClientId, msg: &IrcMessage)
             for ch in &channels {
                 state.logger().log_nick_change(ch, &old_prefix, new_nick);
             }
+
+            // Relay nick change to remote nodes (they derive nick
+            // presence from the NICK message prefix → new nick).
+            state.relay_publish(&nick_msg).await;
 
             debug!(client_id = %client_id, old = %old_prefix, new = %new_nick, "nick change");
         }
@@ -188,6 +197,9 @@ async fn handle_join(state: &SharedState, client_id: ClientId, msg: &IrcMessage)
         // Send NAMES list to the joining client.
         send_names_to_client(state, &client, &channel.name).await;
 
+        // Relay JOIN to remote nodes.
+        state.relay_publish(&join_msg).await;
+
         state.logger().log_join(&channel.name, &client.info.nick);
         debug!(client_id = %client_id, channel = %channel.name, "joined channel");
     }
@@ -223,6 +235,10 @@ async fn handle_part(state: &SharedState, client_id: ClientId, msg: &IrcMessage)
                 for member in &remaining {
                     member.send_line(&line);
                 }
+
+                // Relay PART to remote nodes.
+                state.relay_publish(&part_msg).await;
+
                 state
                     .logger()
                     .log_part(channel_name, &client.info.nick, reason.unwrap_or(""));
@@ -279,16 +295,13 @@ async fn route_message(state: &SharedState, client_id: ClientId, msg: &IrcMessag
                 // Serialize once, share the Arc<str> with all recipients.
                 let line: Arc<str> = outgoing.serialize().into();
 
-                // Batch silence check: acquire the lock once for all recipients.
-                let recipient_ids: Vec<ClientId> = members.iter().map(|m| m.id).collect();
-                let silencers = state.silenced_by_batch(client_id, &recipient_ids).await;
-
                 for member in &members {
-                    if silencers.contains(&member.id) {
-                        continue;
-                    }
                     member.send_line(&line);
                 }
+
+                // Relay channel message to remote nodes.
+                state.relay_publish(&outgoing).await;
+
                 // Log channel message.
                 match cmd {
                     Command::Notice => state.logger().log_notice(target, &client.info.nick, text),
@@ -303,21 +316,34 @@ async fn route_message(state: &SharedState, client_id: ClientId, msg: &IrcMessag
         }
     } else {
         // Direct message to a user.
-        match state.find_client_by_nick(target).await {
-            Some(target_client) => {
-                // Block delivery if the recipient has silenced the sender.
-                if state.is_silenced_by(client_id, target_client.id).await {
-                    // Silently drop — sender gets no error (they're ghosted).
-                    return;
-                }
-                target_client.send_message(&outgoing);
+        // Check nick_kind to handle both local and remote routing.
+        match state.nick_kind(target).await {
+            Some(ClientKind::Local(_)) => {
+                // Local client — deliver directly.
+                if let Some(target_client) = state.find_client_by_nick(target).await {
+                    target_client.send_message(&outgoing);
 
-                // If the target is away and this is a PRIVMSG, send RPL_AWAY to sender.
-                if cmd == Command::Privmsg
-                    && let Some(away_msg) = state.get_away_message(target_client.id).await
-                {
-                    client.send_numeric(RPL_AWAY, &[&target_client.info.nick, &away_msg]);
+                    // If the target is away and this is a PRIVMSG, send RPL_AWAY to sender.
+                    if cmd == Command::Privmsg
+                        && let Some(away_msg) = state.get_away_message(target_client.id).await
+                    {
+                        client.send_numeric(RPL_AWAY, &[&target_client.info.nick, &away_msg]);
+                    }
+
+                    // Log DM (keyed by recipient nick).
+                    match cmd {
+                        Command::Notice => {
+                            state.logger().log_notice(target, &client.info.nick, text)
+                        }
+                        _ => state.logger().log_message(target, &client.info.nick, text),
+                    }
+                } else if cmd == Command::Privmsg {
+                    client.send_numeric(ERR_NOSUCHNICK, &[target, "No such nick/channel"]);
                 }
+            }
+            Some(ClientKind::Remote(_)) => {
+                // Remote client — relay the message; the remote node will deliver locally.
+                state.relay_publish(&outgoing).await;
 
                 // Log DM (keyed by recipient nick).
                 match cmd {
@@ -358,6 +384,9 @@ async fn handle_quit(state: &SharedState, client_id: ClientId, msg: &IrcMessage)
         for peer in &peers {
             peer.send_line(&line);
         }
+
+        // Relay QUIT to remote nodes (they derive nick removal from this).
+        state.relay_publish(&quit_msg).await;
     }
 
     // Send ERROR to the quitting client.
@@ -422,14 +451,14 @@ async fn handle_topic(state: &SharedState, client_id: ClientId, msg: &IrcMessage
             client.send_numeric(ERR_NOSUCHCHANNEL, &[channel_name, "No such channel"]);
         }
         Some(ch) => {
-            if !ch.is_member(client_id) {
+            if !ch.is_member_id(client_id) {
                 client.send_numeric(
                     ERR_NOTONCHANNEL,
                     &[channel_name, "You're not on that channel"],
                 );
                 return;
             }
-            if ch.modes.topic_locked && !ch.is_operator(client_id) {
+            if ch.modes.topic_locked && !ch.is_operator_id(client_id) {
                 client.send_numeric(
                     ERR_CHANOPRIVSNEEDED,
                     &[channel_name, "You're not channel operator"],
@@ -461,6 +490,10 @@ async fn handle_topic(state: &SharedState, client_id: ClientId, msg: &IrcMessage
                 for member in &members {
                     member.send_line(&line);
                 }
+
+                // Relay TOPIC change to remote nodes.
+                state.relay_publish(&topic_msg).await;
+
                 state
                     .logger()
                     .log_topic(channel_name, &client.info.nick, &new_topic);
@@ -541,9 +574,9 @@ async fn handle_channel_mode(
                     return;
                 }
 
-                if let Some(target) = state.find_client_by_nick(target_nick).await {
+                if let Some(_target) = state.find_client_by_nick(target_nick).await {
                     state
-                        .set_channel_operator(channel_name, target.id, setting)
+                        .set_channel_operator(channel_name, target_nick, setting)
                         .await;
 
                     // Broadcast mode change.
@@ -563,6 +596,9 @@ async fn handle_channel_mode(
                             member.send_line(&line);
                         }
                     }
+
+                    // Relay MODE change to remote nodes.
+                    state.relay_publish(&mode_msg).await;
                 } else {
                     client.send_numeric(ERR_NOSUCHNICK, &[target_nick, "No such nick"]);
                 }
@@ -595,6 +631,9 @@ async fn handle_channel_mode(
                         member.send_line(&line);
                     }
                 }
+
+                // Relay MODE change to remote nodes.
+                state.relay_publish(&mode_msg).await;
             }
             'k' => {
                 if !state.is_channel_operator(channel_name, client_id).await {
@@ -636,6 +675,9 @@ async fn handle_channel_mode(
                         member.send_line(&line);
                     }
                 }
+
+                // Relay MODE change to remote nodes.
+                state.relay_publish(&mode_msg).await;
             }
             'l' => {
                 if !state.is_channel_operator(channel_name, client_id).await {
@@ -672,6 +714,9 @@ async fn handle_channel_mode(
                         member.send_line(&line);
                     }
                 }
+
+                // Relay MODE change to remote nodes.
+                state.relay_publish(&mode_msg).await;
             }
             _ => {}
         }
@@ -861,7 +906,10 @@ async fn handle_kick(state: &SharedState, client_id: ClientId, msg: &IrcMessage)
         }
     }
 
-    state.kick_from_channel(channel_name, target.id).await;
+    // Relay KICK to remote nodes.
+    state.relay_publish(&kick_msg).await;
+
+    state.kick_from_channel(channel_name, target_nick).await;
     state.logger().log_kick(
         channel_name,
         &target.info.nick,
@@ -896,7 +944,7 @@ async fn handle_invite(state: &SharedState, client_id: ClientId, msg: &IrcMessag
     // If channel exists, validate membership and permissions.
     if let Some(channel) = state.get_channel(channel_name).await {
         // Inviter must be on the channel.
-        if !channel.is_member(client_id) {
+        if !channel.is_member_id(client_id) {
             client.send_numeric(
                 ERR_NOTONCHANNEL,
                 &[channel_name, "You're not on that channel"],
@@ -905,7 +953,7 @@ async fn handle_invite(state: &SharedState, client_id: ClientId, msg: &IrcMessag
         }
 
         // Target must not already be on the channel.
-        if channel.is_member(target.id) {
+        if channel.is_member_nick(target_nick) {
             client.send_numeric(
                 ERR_USERONCHANNEL,
                 &[target_nick, channel_name, "is already on channel"],
@@ -914,7 +962,7 @@ async fn handle_invite(state: &SharedState, client_id: ClientId, msg: &IrcMessag
         }
 
         // If channel is +i, only operators may invite.
-        if channel.modes.invite_only && !channel.is_operator(client_id) {
+        if channel.modes.invite_only && !channel.is_operator_id(client_id) {
             client.send_numeric(
                 ERR_CHANOPRIVSNEEDED,
                 &[channel_name, "You're not channel operator"],
@@ -995,167 +1043,6 @@ async fn handle_ison(state: &SharedState, client_id: ClientId, msg: &IrcMessage)
 
     let reply = online_nicks.join(" ");
     client.send_numeric(RPL_ISON, &[&reply]);
-}
-
-// ---------------------------------------------------------------------------
-// SILENCE — server-side message filtering (+nick / -nick / list)
-// ---------------------------------------------------------------------------
-
-async fn handle_silence(state: &SharedState, client_id: ClientId, msg: &IrcMessage) {
-    let Some(client) = state.get_client(client_id).await else {
-        return;
-    };
-
-    // No params → list currently silenced nicks (with reasons).
-    if msg.params.is_empty() {
-        let silenced = state.get_silence_list(client_id).await;
-        if silenced.is_empty() {
-            let notice = IrcMessage::notice(&client.info.nick, "Your silence list is empty")
-                .with_prefix(state.server_name());
-            client.send_message(&notice);
-        } else {
-            for (tid, reason) in &silenced {
-                if let Some(target) = state.get_client(*tid).await {
-                    let line = match reason {
-                        Some(r) => format!("SILENCE +{} :{}", target.info.nick, r),
-                        None => format!("SILENCE +{}", target.info.nick),
-                    };
-                    let notice = IrcMessage::notice(&client.info.nick, &line)
-                        .with_prefix(state.server_name());
-                    client.send_message(&notice);
-                }
-            }
-            let notice = IrcMessage::notice(&client.info.nick, "End of silence list")
-                .with_prefix(state.server_name());
-            client.send_message(&notice);
-        }
-        return;
-    }
-
-    // Multi-nick support: iterate params as +nick/-nick entries.
-    // A trailing param starting with ':' is parsed by the IRC message parser
-    // as the last element of params — it's the reason for all +nick additions.
-    //
-    // Example: SILENCE +alice +bob -carol :spamming the channel
-    //   params = ["+alice", "+bob", "-carol", "spamming the channel"]
-    //
-    // Detect the reason: the last param is a reason if it doesn't look like
-    // a +nick/-nick entry (i.e. doesn't start with '+' or '-').
-    let (nick_params, reason) = {
-        let last = msg.params.last().unwrap(); // safe: params is non-empty
-        if !last.starts_with('+') && !last.starts_with('-') {
-            // Last param is a trailing reason.
-            let reason = if last.is_empty() {
-                None
-            } else {
-                Some(last.clone())
-            };
-            (&msg.params[..msg.params.len() - 1], reason)
-        } else {
-            (&msg.params[..], None)
-        }
-    };
-
-    // If all params were consumed as a reason (e.g. "SILENCE :some text"),
-    // there are no nick entries to process.
-    if nick_params.is_empty() {
-        client.send_numeric(ERR_NEEDMOREPARAMS, &["SILENCE", "Not enough parameters"]);
-        return;
-    }
-
-    for param in nick_params {
-        let (adding, target_nick) = if let Some(nick) = param.strip_prefix('+') {
-            (true, nick)
-        } else if let Some(nick) = param.strip_prefix('-') {
-            (false, nick)
-        } else {
-            // Bare nick treated as +nick (add to silence list).
-            (true, param.as_str())
-        };
-
-        if target_nick.is_empty() {
-            client.send_numeric(ERR_NEEDMOREPARAMS, &["SILENCE", "Not enough parameters"]);
-            continue;
-        }
-
-        // Cannot silence yourself.
-        if target_nick.eq_ignore_ascii_case(&client.info.nick) {
-            let notice = IrcMessage::notice(&client.info.nick, "You cannot silence yourself")
-                .with_prefix(state.server_name());
-            client.send_message(&notice);
-            continue;
-        }
-
-        let Some(target) = state.find_client_by_nick(target_nick).await else {
-            client.send_numeric(ERR_NOSUCHNICK, &[target_nick, "No such nick/channel"]);
-            continue;
-        };
-
-        if adding {
-            // SILENCE +nick — add to silence list (with optional reason).
-            state
-                .add_silence(client_id, target.id, reason.clone())
-                .await;
-
-            // Notify the silencing client (DM only).
-            let msg_text = match &reason {
-                Some(r) => format!("You are now ignoring {} ({})", target.info.nick, r),
-                None => format!("You are now ignoring {}", target.info.nick),
-            };
-            let notice =
-                IrcMessage::notice(&client.info.nick, &msg_text).with_prefix(state.server_name());
-            client.send_message(&notice);
-
-            // Notify the silenced person (DM only — no channel broadcast).
-            let msg_text = match &reason {
-                Some(r) => format!("{} is now ignoring you ({})", client.info.nick, r),
-                None => format!("{} is now ignoring you", client.info.nick),
-            };
-            let notice =
-                IrcMessage::notice(&target.info.nick, &msg_text).with_prefix(state.server_name());
-            target.send_message(&notice);
-
-            debug!(
-                client_id = %client_id,
-                target = %target.info.nick,
-                reason = reason.as_deref().unwrap_or(""),
-                "silence +nick"
-            );
-        } else {
-            // SILENCE -nick — remove from silence list.
-            if !state.remove_silence(client_id, target.id).await {
-                let notice = IrcMessage::notice(
-                    &client.info.nick,
-                    &format!("You are not ignoring {}", target.info.nick),
-                )
-                .with_prefix(state.server_name());
-                client.send_message(&notice);
-                continue;
-            }
-
-            // Notify the client (DM only).
-            let notice = IrcMessage::notice(
-                &client.info.nick,
-                &format!("You are no longer ignoring {}", target.info.nick),
-            )
-            .with_prefix(state.server_name());
-            client.send_message(&notice);
-
-            // Notify the previously silenced person (DM only — no channel broadcast).
-            let notice = IrcMessage::notice(
-                &target.info.nick,
-                &format!("{} is no longer ignoring you", client.info.nick),
-            )
-            .with_prefix(state.server_name());
-            target.send_message(&notice);
-
-            debug!(
-                client_id = %client_id,
-                target = %target.info.nick,
-                "silence -nick"
-            );
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------

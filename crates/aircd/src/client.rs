@@ -7,10 +7,26 @@ use airc_shared::IrcMessage;
 use tokio::sync::mpsc;
 
 // ---------------------------------------------------------------------------
+// NodeId — identifies a remote aircd instance in a cluster
+// ---------------------------------------------------------------------------
+
+/// Opaque identifier for a remote aircd node (auto-generated UUID at startup).
+///
+/// In single-instance mode this type exists but is never instantiated.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NodeId(pub String);
+
+impl fmt::Display for NodeId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ClientId
 // ---------------------------------------------------------------------------
 
-/// Unique, opaque identifier for a connected client.
+/// Unique, opaque identifier for a locally connected client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ClientId(pub u64);
 
@@ -18,6 +34,25 @@ impl fmt::Display for ClientId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "C{}", self.0)
     }
+}
+
+// ---------------------------------------------------------------------------
+// ClientKind — unified representation of a user in the network
+// ---------------------------------------------------------------------------
+
+/// Whether a user is locally connected or present on a remote node.
+///
+/// Used in both the global nick registry (`nick_to_kind`) and channel
+/// membership maps. For local clients, the `ClientId` resolves to a
+/// `ClientHandle` with an mpsc sender. For remote clients, the `NodeId`
+/// tells us which node to relay messages to.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ClientKind {
+    /// Connected to this instance — has a `ClientHandle` in the `clients` map.
+    Local(ClientId),
+    /// Connected to a remote node — reachable via the relay.
+    #[allow(dead_code)] // Used when relay is wired up.
+    Remote(NodeId),
 }
 
 // ---------------------------------------------------------------------------

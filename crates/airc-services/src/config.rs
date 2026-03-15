@@ -60,6 +60,8 @@ struct NickServModulesConfig {
     reputation: Option<bool>,
     /// FRIEND (social graph, moved from aircd).
     social: Option<bool>,
+    /// SILENCE (client-side filtering, moved from aircd).
+    silence: Option<bool>,
 }
 
 impl Default for NickServModulesConfig {
@@ -69,6 +71,7 @@ impl Default for NickServModulesConfig {
             keypair: Some(true),
             reputation: Some(true),
             social: Some(true),
+            silence: Some(true),
         }
     }
 }
@@ -144,6 +147,7 @@ pub struct NickServModules {
     pub keypair: bool,
     pub reputation: bool,
     pub social: bool,
+    pub silence: bool,
 }
 
 impl Default for NickServModules {
@@ -153,6 +157,7 @@ impl Default for NickServModules {
             keypair: true,
             reputation: true,
             social: true,
+            silence: true,
         }
     }
 }
@@ -261,6 +266,9 @@ impl ServicesConfig {
                 }
                 if let Some(v) = mods.social {
                     cfg.nickserv_modules.social = v;
+                }
+                if let Some(v) = mods.silence {
+                    cfg.nickserv_modules.silence = v;
                 }
             }
 

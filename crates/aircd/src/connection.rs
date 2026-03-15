@@ -243,6 +243,10 @@ impl Connection {
                     .await
                 {
                     Ok(handle) => {
+                        // Announce the new nick to remote nodes via the relay bus.
+                        let nick_msg =
+                            IrcMessage::nick(&handle.info.nick).with_prefix(handle.prefix());
+                        self.state.relay_publish(&nick_msg).await;
                         send_welcome_burst(&self.state, &handle);
                         return Some(handle);
                     }
@@ -354,6 +358,9 @@ async fn handle_unexpected_disconnect(state: &SharedState, client_id: ClientId) 
         for peer in &peers {
             peer.send_line(&line);
         }
+
+        // Relay QUIT to remote nodes (they derive nick removal from this).
+        state.relay_publish(&quit_msg).await;
     }
 
     state.remove_client(client_id).await;

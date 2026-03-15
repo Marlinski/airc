@@ -541,26 +541,29 @@ async fn execute_request(
 
         Command::Silence(r) => {
             if r.list {
-                // List silenced nicks — send bare SILENCE command.
-                match client.send_line("SILENCE").await {
-                    Ok(()) => ipc::response_ok("silence list requested"),
+                // List silenced nicks — ask NickServ.
+                match client.send_line("PRIVMSG NickServ :SILENCE").await {
+                    Ok(()) => ipc::response_ok("silence list requested via NickServ"),
                     Err(e) => ipc::response_err(&format!("silence list failed: {e}")),
                 }
             } else if r.remove {
-                // Unsilence — send SILENCE -nick.
-                match client.send_line(&format!("SILENCE -{}", r.nick)).await {
+                // Unsilence — ask NickServ to remove from silence list.
+                match client
+                    .send_line(&format!("PRIVMSG NickServ :SILENCE -{}", r.nick))
+                    .await
+                {
                     Ok(()) => ipc::response_ok(&format!("unsilenced {}", r.nick)),
                     Err(e) => ipc::response_err(&format!("unsilence failed: {e}")),
                 }
             } else {
-                // Silence — send SILENCE +nick [:reason].
-                let line = match r.reason {
+                // Silence — ask NickServ to add to silence list.
+                let msg = match r.reason {
                     Some(ref reason) if !reason.is_empty() => {
-                        format!("SILENCE +{} :{}", r.nick, reason)
+                        format!("PRIVMSG NickServ :SILENCE +{} {}", r.nick, reason)
                     }
-                    _ => format!("SILENCE +{}", r.nick),
+                    _ => format!("PRIVMSG NickServ :SILENCE +{}", r.nick),
                 };
-                match client.send_line(&line).await {
+                match client.send_line(&msg).await {
                     Ok(()) => ipc::response_ok(&format!("silenced {}", r.nick)),
                     Err(e) => ipc::response_err(&format!("silence failed: {e}")),
                 }

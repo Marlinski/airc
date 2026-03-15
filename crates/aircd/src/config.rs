@@ -49,6 +49,32 @@ pub struct OperatorEntry {
     pub service: bool,
 }
 
+/// Relay backend configuration.
+///
+/// Configured in TOML as:
+/// ```toml
+/// [relay]
+/// backend = "none"   # or "redis" in the future
+/// redis_url = "redis://127.0.0.1:6379"
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct RelayConfig {
+    /// Backend type: `"none"` (default, single-instance) or `"redis"` (future).
+    pub backend: String,
+    /// Redis URL for the `redis` backend.
+    pub redis_url: Option<String>,
+}
+
+impl Default for RelayConfig {
+    fn default() -> Self {
+        Self {
+            backend: "none".to_string(),
+            redis_url: None,
+        }
+    }
+}
+
 /// Deserialized representation of `aircd.toml`.
 ///
 /// All fields are optional — missing fields are filled from defaults or env.
@@ -76,6 +102,9 @@ struct ConfigFile {
     /// IRC operator accounts.
     #[serde(default)]
     operators: Vec<OperatorEntry>,
+    /// Relay backend configuration.
+    #[serde(default)]
+    relay: RelayConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -103,6 +132,8 @@ pub struct ServerConfig {
     pub tls_bind: Option<String>,
     /// IRC operator accounts.
     pub operators: Vec<OperatorEntry>,
+    /// Relay backend configuration.
+    pub relay: RelayConfig,
 }
 
 impl Default for ServerConfig {
@@ -117,6 +148,7 @@ impl Default for ServerConfig {
             tls_key: None,
             tls_bind: None,
             operators: Vec::new(),
+            relay: RelayConfig::default(),
         }
     }
 }
@@ -207,6 +239,9 @@ impl ServerConfig {
                 cfg.operators = f.operators;
             }
 
+            // Relay configuration.
+            cfg.relay = f.relay;
+
             // MOTD: inline takes precedence over file path.
             if let Some(lines) = f.motd {
                 cfg.motd = lines;
@@ -247,6 +282,12 @@ impl ServerConfig {
         }
         if let Ok(v) = std::env::var("AIRCD_TLS_BIND") {
             cfg.tls_bind = Some(v);
+        }
+        if let Ok(v) = std::env::var("AIRCD_RELAY_BACKEND") {
+            cfg.relay.backend = v;
+        }
+        if let Ok(v) = std::env::var("AIRCD_RELAY_REDIS_URL") {
+            cfg.relay.redis_url = Some(v);
         }
 
         // Layer 4: CLI flags (only override if explicitly provided).

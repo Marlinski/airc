@@ -5,10 +5,12 @@
 //! - **keypair**: REGISTER-KEY, CHALLENGE, VERIFY
 //! - **reputation**: VOUCH, REPORT, REPUTATION
 //! - **social**: FRIEND (social graph, moved from aircd)
+//! - **silence**: SILENCE (client-side filtering, moved from aircd)
 
 pub mod identity;
 pub mod keypair;
 pub mod reputation;
+pub mod silence;
 pub mod social;
 
 use std::collections::HashMap;
@@ -69,6 +71,26 @@ pub struct FriendList {
 }
 
 // ---------------------------------------------------------------------------
+// Silence entry (persisted)
+// ---------------------------------------------------------------------------
+
+/// A single silenced nick with optional reason.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SilenceEntry {
+    /// Lowercase nick of the silenced user.
+    pub nick: String,
+    /// Optional reason for silencing.
+    pub reason: Option<String>,
+}
+
+/// Per-identity silence list.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SilenceList {
+    /// Silenced nicks for this identity.
+    pub entries: Vec<SilenceEntry>,
+}
+
+// ---------------------------------------------------------------------------
 // NickServ shared state
 // ---------------------------------------------------------------------------
 
@@ -86,6 +108,8 @@ pub struct NickServState {
     rate_limits: RwLock<HashMap<String, u64>>,
     /// Per-identity friend lists, keyed by lowercase nick.
     friend_lists: RwLock<HashMap<String, FriendList>>,
+    /// Per-identity silence lists, keyed by lowercase nick.
+    silence_lists: RwLock<HashMap<String, SilenceList>>,
     /// Directory for persistence files.
     data_dir: PathBuf,
     /// IRC client connection for raw line sends (e.g. KILL for GHOST).
@@ -101,11 +125,15 @@ impl NickServState {
         let friends_path = data_dir.join("nickserv_friends.json");
         let friend_lists = load_friend_lists(&friends_path).unwrap_or_default();
 
+        let silence_path = data_dir.join("nickserv_silence.json");
+        let silence_lists = load_silence_lists(&silence_path).unwrap_or_default();
+
         Self {
             identities: RwLock::new(identities),
             challenges: RwLock::new(HashMap::new()),
             rate_limits: RwLock::new(HashMap::new()),
             friend_lists: RwLock::new(friend_lists),
+            silence_lists: RwLock::new(silence_lists),
             data_dir: data_dir.to_path_buf(),
             client,
         }
@@ -269,6 +297,56 @@ impl NickServState {
             .unwrap_or_default()
     }
 
+    // -- Silence lists ------------------------------------------------------
+
+    /// Add a nick to an identity's silence list. Returns `true` if added.
+    pub async fn add_silence(&self, nick: &str, target: &str, reason: Option<&str>) -> bool {
+        let nick_lower = nick.to_ascii_lowercase();
+        let target_lower = target.to_ascii_lowercase();
+        let mut lists = self.silence_lists.write().await;
+        let list = lists.entry(nick_lower).or_default();
+        if list.entries.iter().any(|e| e.nick == target_lower) {
+            return false; // already silenced
+        }
+        list.entries.push(SilenceEntry {
+            nick: target_lower,
+            reason: reason.map(|s| s.to_string()),
+        });
+        drop(lists);
+        self.persist_silence().await;
+        true
+    }
+
+    /// Remove a nick from an identity's silence list. Returns `true` if removed.
+    pub async fn remove_silence(&self, nick: &str, target: &str) -> bool {
+        let nick_lower = nick.to_ascii_lowercase();
+        let target_lower = target.to_ascii_lowercase();
+        let mut lists = self.silence_lists.write().await;
+        let Some(list) = lists.get_mut(&nick_lower) else {
+            return false;
+        };
+        let before = list.entries.len();
+        list.entries.retain(|e| e.nick != target_lower);
+        let removed = list.entries.len() < before;
+        if list.entries.is_empty() {
+            lists.remove(&nick_lower);
+        }
+        drop(lists);
+        if removed {
+            self.persist_silence().await;
+        }
+        removed
+    }
+
+    /// Get the silence list for a nick.
+    pub async fn get_silence_list(&self, nick: &str) -> Vec<SilenceEntry> {
+        let lists = self.silence_lists.read().await;
+        lists
+            .get(&nick.to_ascii_lowercase())
+            .map(|sl| sl.entries.clone())
+            .unwrap_or_default()
+    }
+
     // -- Persistence --------------------------------------------------------
 
     async fn persist_identities(&self) {
@@ -284,6 +362,14 @@ impl NickServState {
         let path = self.data_dir.join("nickserv_friends.json");
         if let Err(e) = save_friend_lists(&path, &lists) {
             warn!(error = %e, "NickServ: failed to persist friend lists");
+        }
+    }
+
+    async fn persist_silence(&self) {
+        let lists = self.silence_lists.read().await;
+        let path = self.data_dir.join("nickserv_silence.json");
+        if let Err(e) = save_silence_lists(&path, &lists) {
+            warn!(error = %e, "NickServ: failed to persist silence lists");
         }
     }
 }
@@ -310,6 +396,9 @@ pub fn build_modules(
     }
     if modules_cfg.social {
         modules.push(Box::new(social::SocialModule::new(state.clone())));
+    }
+    if modules_cfg.silence {
+        modules.push(Box::new(silence::SilenceModule::new(state.clone())));
     }
 
     modules
@@ -402,5 +491,24 @@ fn save_friend_lists(
     let data = serde_json::to_string_pretty(lists)?;
     std::fs::write(path, data)?;
     debug!(count = lists.len(), path = %path.display(), "NickServ: persisted friend lists");
+    Ok(())
+}
+
+fn load_silence_lists(
+    path: &Path,
+) -> Result<HashMap<String, SilenceList>, Box<dyn std::error::Error>> {
+    let data = std::fs::read_to_string(path)?;
+    let map: HashMap<String, SilenceList> = serde_json::from_str(&data)?;
+    info!(count = map.len(), path = %path.display(), "NickServ: loaded silence lists");
+    Ok(map)
+}
+
+fn save_silence_lists(
+    path: &Path,
+    lists: &HashMap<String, SilenceList>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let data = serde_json::to_string_pretty(lists)?;
+    std::fs::write(path, data)?;
+    debug!(count = lists.len(), path = %path.display(), "NickServ: persisted silence lists");
     Ok(())
 }

@@ -16,9 +16,10 @@ use airc_shared::aircd_ipc;
 use airc_shared::{Command, IrcMessage};
 
 use crate::channel::Channel;
-use crate::client::{ClientHandle, ClientId, ClientInfo};
+use crate::client::{ClientHandle, ClientId, ClientInfo, ClientKind};
 use crate::config::ServerConfig;
 use crate::logger::ChannelLogger;
+use crate::relay::Relay;
 use crate::web;
 
 // ---------------------------------------------------------------------------
@@ -41,14 +42,14 @@ pub enum NickError {
 struct Inner {
     clients: RwLock<HashMap<ClientId, ClientHandle>>,
     channels: RwLock<HashMap<String, Channel>>,
-    nick_to_id: RwLock<HashMap<String, ClientId>>,
-    /// Per-client silence lists: key = silencer, value = map of silenced client ID → optional reason.
-    silence_lists: RwLock<HashMap<ClientId, HashMap<ClientId, Option<String>>>>,
+    /// Global nick registry: lowercase nick → local or remote.
+    nick_to_kind: RwLock<HashMap<String, ClientKind>>,
     /// Per-client away messages. Absent = not away.
     away_messages: RwLock<HashMap<ClientId, String>>,
     next_id: AtomicU64,
     config: ServerConfig,
     logger: ChannelLogger,
+    relay: Arc<dyn Relay>,
     started_at: Instant,
 }
 
@@ -63,22 +64,28 @@ pub struct SharedState {
 }
 
 impl SharedState {
-    /// Create a fresh server state from the given config.
-    pub fn new(config: ServerConfig) -> Self {
+    /// Create a fresh server state from the given config and relay backend.
+    pub fn new(config: ServerConfig, relay: Arc<dyn Relay>) -> Self {
         let log_dir = config.log_dir.as_ref().map(PathBuf::from);
         Self {
             inner: Arc::new(Inner {
                 clients: RwLock::new(HashMap::new()),
                 channels: RwLock::new(HashMap::new()),
-                nick_to_id: RwLock::new(HashMap::new()),
-                silence_lists: RwLock::new(HashMap::new()),
+                nick_to_kind: RwLock::new(HashMap::new()),
                 away_messages: RwLock::new(HashMap::new()),
                 next_id: AtomicU64::new(1),
                 config,
                 logger: ChannelLogger::new(log_dir),
+                relay,
                 started_at: Instant::now(),
             }),
         }
+    }
+
+    /// Access the relay backend.
+    #[allow(dead_code)] // Will be used by handler.rs in upcoming relay wiring.
+    pub fn relay(&self) -> &dyn Relay {
+        &*self.inner.relay
     }
 
     // -- Identity -----------------------------------------------------------
@@ -111,7 +118,11 @@ impl SharedState {
         let id = handle.id;
         let nick_lower = handle.info.nick.to_ascii_lowercase();
         self.inner.clients.write().await.insert(id, handle);
-        self.inner.nick_to_id.write().await.insert(nick_lower, id);
+        self.inner
+            .nick_to_kind
+            .write()
+            .await
+            .insert(nick_lower, ClientKind::Local(id));
     }
 
     /// Remove a client from all state (client map, nick map, all channels).
@@ -120,14 +131,14 @@ impl SharedState {
         let handle = self.inner.clients.write().await.remove(&id);
         if let Some(ref h) = handle {
             let nick_lower = h.info.nick.to_ascii_lowercase();
-            self.inner.nick_to_id.write().await.remove(&nick_lower);
+            self.inner.nick_to_kind.write().await.remove(&nick_lower);
         }
-        // Remove from every channel.
+        // Remove from every channel (by ClientId — finds and removes the nick).
         let mut channels = self.inner.channels.write().await;
         let empty_channels: Vec<String> = channels
             .iter_mut()
             .filter_map(|(name, ch)| {
-                ch.remove_member(id);
+                ch.remove_member_by_id(id);
                 if ch.members.is_empty() {
                     Some(name.clone())
                 } else {
@@ -139,15 +150,6 @@ impl SharedState {
             channels.remove(&name);
         }
 
-        // Clean up silence lists: remove this client's own list and remove them
-        // from everyone else's silence maps.
-        let mut silence = self.inner.silence_lists.write().await;
-        silence.remove(&id);
-        for map in silence.values_mut() {
-            map.remove(&id);
-        }
-        drop(silence);
-
         // Clean up away status.
         self.inner.away_messages.write().await.remove(&id);
 
@@ -155,12 +157,22 @@ impl SharedState {
     }
 
     /// Find a client by nickname (case-insensitive). Returns a cloned handle.
+    ///
+    /// Only resolves local clients — remote nicks return `None` (they have no
+    /// `ClientHandle`). Callers that need to route to remote nicks should check
+    /// `nick_to_kind` directly via the relay layer.
     pub async fn find_client_by_nick(&self, nick: &str) -> Option<ClientHandle> {
         let nick_lower = nick.to_ascii_lowercase();
-        let id = self.inner.nick_to_id.read().await.get(&nick_lower).copied();
-        match id {
-            Some(id) => self.inner.clients.read().await.get(&id).cloned(),
-            None => None,
+        let kind = self
+            .inner
+            .nick_to_kind
+            .read()
+            .await
+            .get(&nick_lower)
+            .cloned();
+        match kind {
+            Some(ClientKind::Local(id)) => self.inner.clients.read().await.get(&id).cloned(),
+            _ => None,
         }
     }
 
@@ -171,7 +183,8 @@ impl SharedState {
 
     /// Attempt to change a registered client's nickname.
     ///
-    /// Validates the new nick, checks for uniqueness, and updates all maps.
+    /// Validates the new nick, checks for uniqueness, and updates all maps
+    /// (nick registry, client info, and channel membership keys).
     pub async fn update_nick(&self, id: ClientId, new_nick: &str) -> Result<(), NickError> {
         if !is_valid_nick(new_nick) {
             return Err(NickError::Invalid);
@@ -180,17 +193,18 @@ impl SharedState {
 
         // Check uniqueness — must not collide with another client.
         {
-            let nick_map = self.inner.nick_to_id.read().await;
-            if let Some(&existing_id) = nick_map.get(&new_lower) {
-                if existing_id != id {
+            let nick_map = self.inner.nick_to_kind.read().await;
+            if let Some(existing) = nick_map.get(&new_lower) {
+                // Allow if this is the same client (case-change only).
+                if *existing != ClientKind::Local(id) {
                     return Err(NickError::InUse);
                 }
             }
         }
 
-        // Perform the swap.
+        // Perform the swap in nick registry and client info.
         let mut clients = self.inner.clients.write().await;
-        let mut nick_map = self.inner.nick_to_id.write().await;
+        let mut nick_map = self.inner.nick_to_kind.write().await;
         if let Some(handle) = clients.get_mut(&id) {
             let old_lower = handle.info.nick.to_ascii_lowercase();
             nick_map.remove(&old_lower);
@@ -198,8 +212,30 @@ impl SharedState {
             let mut new_info = (*handle.info).clone();
             new_info.nick = new_nick.to_string();
             handle.info = Arc::new(new_info);
-            nick_map.insert(new_lower, id);
+            nick_map.insert(new_lower.clone(), ClientKind::Local(id));
         }
+        drop(clients);
+        drop(nick_map);
+
+        // Update channel membership keys: remove old nick, re-insert with new nick.
+        let mut channels = self.inner.channels.write().await;
+        for ch in channels.values_mut() {
+            if let Some(kind) = ch.members.remove(&new_lower) {
+                // Edge case: nick was already the new_lower (shouldn't happen
+                // but be safe).
+                ch.members.insert(new_lower.clone(), kind);
+            } else if let Some(nick) = ch.nick_for_id(id).map(|n| n.to_string()) {
+                // Remove old nick entry, re-insert under new nick.
+                if let Some(kind) = ch.members.remove(&nick) {
+                    ch.members.insert(new_lower.clone(), kind);
+                }
+                // Update operators set.
+                if ch.operators.remove(&nick) {
+                    ch.operators.insert(new_lower.clone());
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -224,7 +260,7 @@ impl SharedState {
 
         // Check uniqueness.
         {
-            let nick_map = self.inner.nick_to_id.read().await;
+            let nick_map = self.inner.nick_to_kind.read().await;
             if nick_map.contains_key(&nick_lower) {
                 return Err(NickError::InUse);
             }
@@ -244,7 +280,11 @@ impl SharedState {
         let handle = ClientHandle::new(id, info, tx, server_name);
 
         self.inner.clients.write().await.insert(id, handle.clone());
-        self.inner.nick_to_id.write().await.insert(nick_lower, id);
+        self.inner
+            .nick_to_kind
+            .write()
+            .await
+            .insert(nick_lower, ClientKind::Local(id));
 
         Ok(handle)
     }
@@ -253,31 +293,42 @@ impl SharedState {
 
     /// Join a client to a channel. Creates the channel if it doesn't exist and
     /// makes the joiner an operator. Returns the `Channel` snapshot and list of
-    /// member handles (for broadcasting the JOIN).
+    /// local member handles (for broadcasting the JOIN).
     pub async fn join_channel(
         &self,
         id: ClientId,
         channel_name: &str,
     ) -> (Channel, Vec<ClientHandle>) {
         let key = channel_name.to_ascii_lowercase();
+
+        // Resolve the client's nick for channel membership.
+        let nick = {
+            let clients = self.inner.clients.read().await;
+            match clients.get(&id) {
+                Some(h) => h.info.nick.clone(),
+                None => return (Channel::new(channel_name.to_string()), vec![]),
+            }
+        };
+        let nick_lower = nick.to_ascii_lowercase();
+
         let mut channels = self.inner.channels.write().await;
         let channel = channels
             .entry(key)
             .or_insert_with(|| Channel::new(channel_name.to_string()));
 
         let is_new_channel = channel.members.is_empty();
-        channel.add_member(id);
+        channel.add_member(&nick, ClientKind::Local(id));
         if is_new_channel {
-            channel.operators.insert(id);
+            channel.operators.insert(nick_lower);
         }
 
         let snapshot = channel.clone();
         drop(channels);
 
-        // Collect handles for all members (for broadcasting).
+        // Collect handles for all local members (for broadcasting).
+        let local_ids = snapshot.local_client_ids();
         let clients = self.inner.clients.read().await;
-        let handles: Vec<ClientHandle> = snapshot
-            .members
+        let handles: Vec<ClientHandle> = local_ids
             .iter()
             .filter_map(|mid| clients.get(mid).cloned())
             .collect();
@@ -286,7 +337,7 @@ impl SharedState {
     }
 
     /// Remove a client from a channel. Returns `None` if the client was not a
-    /// member. Otherwise returns a snapshot of remaining member handles.
+    /// member. Otherwise returns a snapshot of remaining local member handles.
     pub async fn part_channel(
         &self,
         id: ClientId,
@@ -296,12 +347,13 @@ impl SharedState {
         let mut channels = self.inner.channels.write().await;
         let channel = channels.get_mut(&key)?;
 
-        if !channel.remove_member(id) {
+        // Remove by ClientId — returns the nick if found.
+        if channel.remove_member_by_id(id).is_none() {
             return None;
         }
 
-        let remaining_ids: Vec<ClientId> = channel.member_list();
-        let is_empty = remaining_ids.is_empty();
+        let remaining_ids = channel.local_client_ids();
+        let is_empty = channel.members.is_empty();
 
         if is_empty {
             channels.remove(&key);
@@ -325,7 +377,7 @@ impl SharedState {
         self.inner.channels.read().await.get(&key).cloned()
     }
 
-    /// Set the topic on a channel. Returns the member handles for broadcasting.
+    /// Set the topic on a channel. Returns the local member handles for broadcasting.
     pub async fn set_channel_topic(
         &self,
         channel_name: &str,
@@ -337,12 +389,12 @@ impl SharedState {
         let mut channels = self.inner.channels.write().await;
         let channel = channels.get_mut(&key)?;
         channel.set_topic(text, setter, timestamp);
-        let member_ids = channel.member_list();
+        let local_ids = channel.local_client_ids();
         drop(channels);
 
         let clients = self.inner.clients.read().await;
         Some(
-            member_ids
+            local_ids
                 .iter()
                 .filter_map(|id| clients.get(id).cloned())
                 .collect(),
@@ -361,20 +413,19 @@ impl SharedState {
             .collect()
     }
 
-    /// Get member handles for a channel.
+    /// Get local member handles for a channel.
     pub async fn channel_members(&self, channel_name: &str) -> Option<Vec<ClientHandle>> {
         let key = channel_name.to_ascii_lowercase();
         let channels = self.inner.channels.read().await;
         let channel = channels.get(&key)?;
-        let ids = channel.member_list();
-        let is_op: Vec<bool> = ids.iter().map(|id| channel.is_operator(*id)).collect();
+        let local_ids = channel.local_client_ids();
         drop(channels);
 
         let clients = self.inner.clients.read().await;
         Some(
-            ids.iter()
-                .zip(is_op.iter())
-                .filter_map(|(id, _)| clients.get(id).cloned())
+            local_ids
+                .iter()
+                .filter_map(|id| clients.get(id).cloned())
                 .collect(),
         )
     }
@@ -384,19 +435,7 @@ impl SharedState {
         let key = channel_name.to_ascii_lowercase();
         let channels = self.inner.channels.read().await;
         let channel = channels.get(&key)?;
-        let ids = channel.member_list();
-        let ops: Vec<bool> = ids.iter().map(|id| channel.is_operator(*id)).collect();
-        drop(channels);
-
-        let clients = self.inner.clients.read().await;
-        let mut nicks = Vec::new();
-        for (id, is_op) in ids.iter().zip(ops.iter()) {
-            if let Some(h) = clients.get(id) {
-                let prefix = if *is_op { "@" } else { "" };
-                nicks.push(format!("{}{}", prefix, h.info.nick));
-            }
-        }
-        Some(nicks)
+        Some(channel.nicks_with_prefix())
     }
 
     /// Get all channels a client is a member of.
@@ -405,7 +444,7 @@ impl SharedState {
         channels
             .iter()
             .filter_map(|(_, ch)| {
-                if ch.is_member(id) {
+                if ch.is_member_id(id) {
                     Some(ch.name.clone())
                 } else {
                     None
@@ -426,15 +465,15 @@ impl SharedState {
         Some((handle, peers))
     }
 
-    /// Collect all unique peer handles that share at least one channel with `id`.
+    /// Collect all unique local peer handles that share at least one channel with `id`.
     pub async fn peers_in_shared_channels(&self, id: ClientId) -> Vec<ClientHandle> {
         let channels = self.inner.channels.read().await;
         let mut peer_ids = std::collections::HashSet::new();
         for ch in channels.values() {
-            if ch.is_member(id) {
-                for &mid in &ch.members {
-                    if mid != id {
-                        peer_ids.insert(mid);
+            if ch.is_member_id(id) {
+                for &local_id in &ch.local_client_ids() {
+                    if local_id != id {
+                        peer_ids.insert(local_id);
                     }
                 }
             }
@@ -448,7 +487,7 @@ impl SharedState {
             .collect()
     }
 
-    /// Get channel member handles excluding a given client.
+    /// Get local channel member handles excluding a given client.
     pub async fn channel_members_except(
         &self,
         channel_name: &str,
@@ -458,10 +497,9 @@ impl SharedState {
         let channels = self.inner.channels.read().await;
         let channel = channels.get(&key)?;
         let ids: Vec<ClientId> = channel
-            .members
-            .iter()
-            .filter(|&&mid| mid != exclude)
-            .copied()
+            .local_client_ids()
+            .into_iter()
+            .filter(|&mid| mid != exclude)
             .collect();
         drop(channels);
 
@@ -473,30 +511,31 @@ impl SharedState {
         )
     }
 
-    /// Check whether a client is an operator in a channel.
+    /// Check whether a client is an operator in a channel (by `ClientId`).
     pub async fn is_channel_operator(&self, channel_name: &str, id: ClientId) -> bool {
         let key = channel_name.to_ascii_lowercase();
         let channels = self.inner.channels.read().await;
-        channels.get(&key).is_some_and(|ch| ch.is_operator(id))
+        channels.get(&key).is_some_and(|ch| ch.is_operator_id(id))
     }
 
-    /// Grant or revoke operator status for a client in a channel.
+    /// Grant or revoke operator status for a nick in a channel.
     pub async fn set_channel_operator(
         &self,
         channel_name: &str,
-        target_id: ClientId,
+        target_nick: &str,
         grant: bool,
     ) -> bool {
         let key = channel_name.to_ascii_lowercase();
+        let nick_lower = target_nick.to_ascii_lowercase();
         let mut channels = self.inner.channels.write().await;
         if let Some(ch) = channels.get_mut(&key) {
-            if !ch.is_member(target_id) {
+            if !ch.is_member_nick(target_nick) {
                 return false;
             }
             if grant {
-                ch.operators.insert(target_id);
+                ch.operators.insert(nick_lower);
             } else {
-                ch.operators.remove(&target_id);
+                ch.operators.remove(&nick_lower);
             }
             true
         } else {
@@ -504,13 +543,37 @@ impl SharedState {
         }
     }
 
-    /// Remove a user from a channel (kick). Returns remaining member handles.
+    /// Remove a user from a channel by nick (kick). Returns remaining local member handles.
     pub async fn kick_from_channel(
         &self,
         channel_name: &str,
-        target_id: ClientId,
+        target_nick: &str,
     ) -> Option<Vec<ClientHandle>> {
-        self.part_channel(target_id, channel_name).await
+        let key = channel_name.to_ascii_lowercase();
+        let mut channels = self.inner.channels.write().await;
+        let channel = channels.get_mut(&key)?;
+
+        if !channel.remove_member(target_nick) {
+            return None;
+        }
+
+        let remaining_ids = channel.local_client_ids();
+        let is_empty = channel.members.is_empty();
+
+        if is_empty {
+            channels.remove(&key);
+            return Some(vec![]);
+        }
+
+        drop(channels);
+
+        let clients = self.inner.clients.read().await;
+        let handles = remaining_ids
+            .iter()
+            .filter_map(|mid| clients.get(mid).cloned())
+            .collect();
+
+        Some(handles)
     }
 
     /// Set or unset a channel mode flag. Returns `true` if the channel exists.
@@ -578,75 +641,6 @@ impl SharedState {
             });
         }
         tracing::info!("created default channels: #lobby, #capabilities, #marketplace");
-    }
-
-    // -- Silence management --------------------------------------------------
-
-    /// Add `target` to `silencer`'s silence list with an optional reason.
-    pub async fn add_silence(&self, silencer: ClientId, target: ClientId, reason: Option<String>) {
-        self.inner
-            .silence_lists
-            .write()
-            .await
-            .entry(silencer)
-            .or_default()
-            .insert(target, reason);
-    }
-
-    /// Remove `target` from `silencer`'s silence list. Returns `true` if it was present.
-    pub async fn remove_silence(&self, silencer: ClientId, target: ClientId) -> bool {
-        let mut lists = self.inner.silence_lists.write().await;
-        if let Some(map) = lists.get_mut(&silencer) {
-            let removed = map.remove(&target).is_some();
-            if map.is_empty() {
-                lists.remove(&silencer);
-            }
-            removed
-        } else {
-            false
-        }
-    }
-
-    /// Check whether `recipient` has silenced `sender`.
-    pub async fn is_silenced_by(&self, sender: ClientId, recipient: ClientId) -> bool {
-        self.inner
-            .silence_lists
-            .read()
-            .await
-            .get(&recipient)
-            .is_some_and(|map| map.contains_key(&sender))
-    }
-
-    /// Check whether `sender` is silenced by any of the given recipients.
-    ///
-    /// Acquires the silence lock **once** and checks all recipients in a batch,
-    /// returning a set of recipient IDs that have silenced the sender.
-    pub async fn silenced_by_batch(
-        &self,
-        sender: ClientId,
-        recipients: &[ClientId],
-    ) -> std::collections::HashSet<ClientId> {
-        let silence = self.inner.silence_lists.read().await;
-        recipients
-            .iter()
-            .filter(|&&rid| {
-                silence
-                    .get(&rid)
-                    .is_some_and(|map| map.contains_key(&sender))
-            })
-            .copied()
-            .collect()
-    }
-
-    /// Get the map of silenced client IDs → optional reasons for `silencer`.
-    pub async fn get_silence_list(&self, silencer: ClientId) -> HashMap<ClientId, Option<String>> {
-        self.inner
-            .silence_lists
-            .read()
-            .await
-            .get(&silencer)
-            .cloned()
-            .unwrap_or_default()
     }
 
     // -- Away management ----------------------------------------------------
@@ -723,6 +717,188 @@ impl SharedState {
         }
     }
 
+    // -- Relay notifications ------------------------------------------------
+    //
+    // Fire-and-forget wrapper around `Relay::publish`. Errors are logged
+    // but never fail the calling IRC command — relay failures are transient
+    // and will self-heal on the next heartbeat / reconnect.
+
+    /// Broadcast an IRC message to all remote nodes.
+    ///
+    /// Called after processing a command that mutates shared state or needs
+    /// remote delivery (JOIN, PART, QUIT, NICK, PRIVMSG, etc.).
+    pub async fn relay_publish(&self, message: &IrcMessage) {
+        if let Err(e) = self.inner.relay.publish(message).await {
+            tracing::warn!(error = %e, "relay: failed to publish message");
+        }
+    }
+
+    /// Subscribe to inbound relay events. Returns the receiver for the
+    /// server's select loop.
+    pub async fn relay_subscribe(
+        &self,
+    ) -> Result<tokio::sync::mpsc::Receiver<crate::relay::InboundEvent>, crate::relay::RelayError>
+    {
+        self.inner.relay.subscribe().await
+    }
+
+    // -- Remote state management --------------------------------------------
+    //
+    // Methods used by the inbound relay task to update local state in response
+    // to events from remote nodes.
+
+    /// Register a remote nick in the global nick registry.
+    ///
+    /// Called when the inbound relay handler sees a NICK or JOIN from a
+    /// remote node, or during `NodeUp` bulk registration.
+    pub async fn add_remote_nick(&self, nick: &str, node_id: crate::client::NodeId) {
+        let nick_lower = nick.to_ascii_lowercase();
+        self.inner
+            .nick_to_kind
+            .write()
+            .await
+            .insert(nick_lower, ClientKind::Remote(node_id));
+    }
+
+    /// Remove a remote nick from the global nick registry.
+    ///
+    /// Called when the inbound relay handler sees a QUIT from a remote node.
+    pub async fn remove_remote_nick(&self, nick: &str) {
+        let nick_lower = nick.to_ascii_lowercase();
+        let mut nick_map = self.inner.nick_to_kind.write().await;
+        // Only remove if it's actually a Remote entry (don't accidentally
+        // remove a local nick if there's a race).
+        if let Some(kind) = nick_map.get(&nick_lower) {
+            if matches!(kind, ClientKind::Remote(_)) {
+                nick_map.remove(&nick_lower);
+            }
+        }
+    }
+
+    /// Add a remote nick to a channel's membership.
+    ///
+    /// Creates the channel if it doesn't exist (remote node's join means the
+    /// channel exists on the network).
+    pub async fn add_remote_channel_member(
+        &self,
+        channel_name: &str,
+        nick: &str,
+        node_id: crate::client::NodeId,
+    ) {
+        let key = channel_name.to_ascii_lowercase();
+        let mut channels = self.inner.channels.write().await;
+        let channel = channels
+            .entry(key)
+            .or_insert_with(|| Channel::new(channel_name.to_string()));
+        channel.add_member(nick, ClientKind::Remote(node_id));
+    }
+
+    /// Remove a remote nick from a channel's membership.
+    pub async fn remove_remote_channel_member(&self, channel_name: &str, nick: &str) {
+        let key = channel_name.to_ascii_lowercase();
+        let mut channels = self.inner.channels.write().await;
+        if let Some(channel) = channels.get_mut(&key) {
+            channel.remove_member(nick);
+            if channel.members.is_empty() {
+                channels.remove(&key);
+            }
+        }
+    }
+
+    /// Remove a remote nick from ALL channels it belongs to.
+    ///
+    /// Called when the inbound relay handler sees a QUIT from a remote node.
+    pub async fn remove_remote_nick_from_all_channels(&self, nick: &str) {
+        let nick_lower = nick.to_ascii_lowercase();
+        let mut channels = self.inner.channels.write().await;
+        for channel in channels.values_mut() {
+            channel.remove_member(&nick_lower);
+        }
+        // Clean up empty channels.
+        channels.retain(|_, ch| !ch.members.is_empty());
+    }
+
+    /// Get all locally connected client handles.
+    ///
+    /// Used by the inbound relay handler to broadcast events (like NICK
+    /// changes or QUITs from remote nodes) to local clients.
+    pub async fn all_local_clients(&self) -> Vec<ClientHandle> {
+        self.inner.clients.read().await.values().cloned().collect()
+    }
+
+    /// Remove all remote members belonging to a node from all channels and
+    /// the nick registry. Returns the list of removed nicks (for QUIT broadcast).
+    pub async fn remove_node(&self, node_id: &crate::client::NodeId) -> Vec<String> {
+        // Remove from nick registry.
+        let mut nick_map = self.inner.nick_to_kind.write().await;
+        let removed_nicks: Vec<String> = nick_map
+            .iter()
+            .filter_map(|(nick, kind)| match kind {
+                ClientKind::Remote(nid) if nid == node_id => Some(nick.clone()),
+                _ => None,
+            })
+            .collect();
+        for nick in &removed_nicks {
+            nick_map.remove(nick);
+        }
+        drop(nick_map);
+
+        // Remove from all channels.
+        let mut channels = self.inner.channels.write().await;
+        for ch in channels.values_mut() {
+            ch.remove_node_members(node_id);
+        }
+        // Clean up empty channels.
+        channels.retain(|_, ch| !ch.members.is_empty());
+
+        removed_nicks
+    }
+
+    /// Look up the `ClientKind` for a nick (case-insensitive).
+    ///
+    /// Returns `None` if the nick is not registered anywhere. This is used
+    /// by the DM routing logic to decide whether to deliver locally, relay
+    /// to a remote node, or return ERR_NOSUCHNICK.
+    pub async fn nick_kind(&self, nick: &str) -> Option<ClientKind> {
+        let nick_lower = nick.to_ascii_lowercase();
+        self.inner
+            .nick_to_kind
+            .read()
+            .await
+            .get(&nick_lower)
+            .cloned()
+    }
+
+    /// Collect all unique local `ClientHandle`s that share at least one channel
+    /// with any remote member from the given node.
+    ///
+    /// Used before `remove_node()` to identify local peers that need a netsplit
+    /// QUIT notification.
+    pub async fn local_peers_of_node(&self, node_id: &crate::client::NodeId) -> Vec<ClientHandle> {
+        let channels = self.inner.channels.read().await;
+        let mut local_ids = std::collections::HashSet::new();
+        for ch in channels.values() {
+            // Check if this channel has any members from the departing node.
+            let has_node_member = ch
+                .members
+                .values()
+                .any(|kind| matches!(kind, ClientKind::Remote(nid) if nid == node_id));
+            if has_node_member {
+                // Collect all local member IDs.
+                for id in ch.local_client_ids() {
+                    local_ids.insert(id);
+                }
+            }
+        }
+        drop(channels);
+
+        let clients = self.inner.clients.read().await;
+        local_ids
+            .iter()
+            .filter_map(|id| clients.get(id).cloned())
+            .collect()
+    }
+
     // -- Shutdown -----------------------------------------------------------
 
     /// Notify all connected clients of server shutdown and remove them from state.
@@ -742,9 +918,8 @@ impl SharedState {
         }
         // Clear all state.
         self.inner.clients.write().await.clear();
-        self.inner.nick_to_id.write().await.clear();
+        self.inner.nick_to_kind.write().await.clear();
         self.inner.channels.write().await.clear();
-        self.inner.silence_lists.write().await.clear();
         self.inner.away_messages.write().await.clear();
     }
 
