@@ -8,15 +8,17 @@ use tracing::info;
 
 use crate::services::chanserv::{ChanServState, RegisteredChannel};
 use crate::services::module::{CommandContext, ServiceModule};
+use crate::state::SharedState;
 
 /// Channel registration and settings module for ChanServ.
 pub struct RegistrationModule {
     state: Arc<ChanServState>,
+    shared: SharedState,
 }
 
 impl RegistrationModule {
-    pub fn new(state: Arc<ChanServState>) -> Self {
-        Self { state }
+    pub fn new(state: Arc<ChanServState>, shared: SharedState) -> Self {
+        Self { state, shared }
     }
 
     // -- REGISTER <channel> [description] -----------------------------------
@@ -29,6 +31,17 @@ impl RegistrationModule {
 
         if !channel.starts_with('#') && !channel.starts_with('&') {
             ctx.reply("Invalid channel name.").await;
+            return;
+        }
+
+        // Must be a channel operator to register.
+        if !self
+            .shared
+            .is_channel_operator_nick(channel, ctx.sender)
+            .await
+        {
+            ctx.reply("You must be a channel operator (@) to register a channel.")
+                .await;
             return;
         }
 

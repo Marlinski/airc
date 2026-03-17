@@ -6,14 +6,16 @@
 //! CSV column order:
 //!
 //! ```text
-//! timestamp,event_type,channel,nick,content
+//! seq,node_id,timestamp,event_type,channel,nick,content
 //! ```
 //!
-//! - `timestamp` — RFC 3339 (e.g. `2026-03-13T14:05:00Z`)
+//! - `seq`        — monotonic u64 counter scoped to this logger instance
+//! - `node_id`    — originating node identity string
+//! - `timestamp`  — RFC 3339 (e.g. `2026-03-13T14:05:00Z`)
 //! - `event_type` — lowercase enum tag
-//! - `channel` — channel name or DM peer nick
-//! - `nick` — who triggered the event
-//! - `content` — message text, reason, new topic, etc. (may be empty)
+//! - `channel`    — channel name or DM peer nick (empty for server-wide events)
+//! - `nick`       — who triggered the event
+//! - `content`    — message text, reason, new topic, etc. (may be empty)
 //!
 //! Fields containing commas, quotes, or newlines are quoted per RFC 4180.
 
@@ -65,11 +67,15 @@ pub fn event_type_from_str(s: &str) -> Option<i32> {
 // ---------------------------------------------------------------------------
 
 /// The CSV header line (for new files).
-pub const CSV_HEADER: &str = "timestamp,event_type,channel,nick,content";
+pub const CSV_HEADER: &str = "seq,node_id,timestamp,event_type,channel,nick,content";
 
 /// Create a new `LogEvent` with the current UTC timestamp.
+/// `seq` and `node_id` are stamped by `FileLoggerInner::write()` — pass 0 / ""
+/// here and they will be overwritten before serialization.
 pub fn log_event_now(event_type: EventType, channel: &str, nick: &str, content: &str) -> LogEvent {
     LogEvent {
+        seq: 0,
+        node_id: String::new(),
         timestamp: utc_now_rfc3339(),
         event_type: event_type as i32,
         channel: channel.to_string(),
@@ -79,9 +85,12 @@ pub fn log_event_now(event_type: EventType, channel: &str, nick: &str, content: 
 }
 
 /// Serialize a `LogEvent` to a single CSV line (no trailing newline).
+/// `seq` and `node_id` are included as the first two columns.
 pub fn log_event_to_csv(event: &LogEvent) -> String {
     format!(
-        "{},{},{},{},{}",
+        "{},{},{},{},{},{},{}",
+        event.seq,
+        csv_field(&event.node_id),
         csv_field(&event.timestamp),
         event_type_to_str(event.event_type),
         csv_field(&event.channel),
@@ -93,15 +102,17 @@ pub fn log_event_to_csv(event: &LogEvent) -> String {
 /// Parse a CSV line back into a `LogEvent`.
 pub fn log_event_from_csv(line: &str) -> Option<LogEvent> {
     let fields = parse_csv_fields(line)?;
-    if fields.len() < 5 {
+    if fields.len() < 7 {
         return None;
     }
     Some(LogEvent {
-        timestamp: fields[0].clone(),
-        event_type: event_type_from_str(&fields[1])?,
-        channel: fields[2].clone(),
-        nick: fields[3].clone(),
-        content: fields[4].clone(),
+        seq: fields[0].parse::<u64>().ok()?,
+        node_id: fields[1].clone(),
+        timestamp: fields[2].clone(),
+        event_type: event_type_from_str(&fields[3])?,
+        channel: fields[4].clone(),
+        nick: fields[5].clone(),
+        content: fields[6].clone(),
     })
 }
 
@@ -121,12 +132,16 @@ pub struct FileLogger {
 
 struct FileLoggerInner {
     log_dir: PathBuf,
+    node_id: String,
+    seq: u64,
     files: HashMap<String, File>,
 }
 
 impl FileLogger {
-    /// Create a logger. Pass `None` to disable logging (all calls become no-ops).
-    pub fn new(log_dir: Option<PathBuf>) -> Self {
+    /// Create a logger. Pass `None` for `log_dir` to disable logging (all calls become no-ops).
+    /// `node_id` identifies the originating node in every log row.
+    pub fn new(log_dir: Option<PathBuf>, node_id: impl Into<String>) -> Self {
+        let node_id = node_id.into();
         match log_dir {
             Some(dir) => {
                 if let Err(_e) = fs::create_dir_all(&dir) {
@@ -135,6 +150,8 @@ impl FileLogger {
                 Self {
                     inner: Some(std::sync::Mutex::new(FileLoggerInner {
                         log_dir: dir,
+                        node_id,
+                        seq: 0,
                         files: HashMap::new(),
                     })),
                 }
@@ -149,6 +166,7 @@ impl FileLogger {
     }
 
     /// Record a log event. No-op if logging is disabled.
+    /// `seq` and `node_id` on the event are overwritten by the inner writer.
     pub fn log(&self, event: &LogEvent) {
         let Some(ref mutex) = self.inner else { return };
         let Ok(mut inner) = mutex.lock() else { return };
@@ -175,7 +193,7 @@ impl FileLogger {
         self.log(&log_event_now(EventType::Part, channel, nick, reason));
     }
 
-    /// Convenience: log a QUIT.
+    /// Convenience: log a QUIT. Use `channel = ""` for server-wide events.
     pub fn log_quit(&self, channel: &str, nick: &str, reason: &str) {
         self.log(&log_event_now(EventType::Quit, channel, nick, reason));
     }
@@ -190,7 +208,7 @@ impl FileLogger {
         self.log(&log_event_now(EventType::Topic, channel, nick, new_topic));
     }
 
-    /// Convenience: log a NICK change.
+    /// Convenience: log a NICK change. Use `channel = ""` for server-wide events.
     pub fn log_nick_change(&self, channel: &str, old_nick: &str, new_nick: &str) {
         self.log(&log_event_now(EventType::Nick, channel, old_nick, new_nick));
     }
@@ -198,8 +216,14 @@ impl FileLogger {
 
 impl FileLoggerInner {
     fn write(&mut self, event: &LogEvent) {
+        // Stamp seq and node_id — caller leaves these as defaults.
+        let mut event = event.clone();
+        event.seq = self.seq;
+        event.node_id = self.node_id.clone();
+        self.seq += 1;
+
         let filename = sanitize_filename(&event.channel);
-        let line = log_event_to_csv(event);
+        let line = log_event_to_csv(&event);
 
         let file = self.files.entry(filename.clone()).or_insert_with(|| {
             let path = self.log_dir.join(format!("{filename}.csv"));
@@ -222,7 +246,11 @@ impl FileLoggerInner {
 }
 
 /// Turn a channel name like `#lobby` into a safe filename like `lobby`.
+/// Empty channel (server-wide events) maps to `_server`.
 pub fn sanitize_filename(name: &str) -> String {
+    if name.is_empty() {
+        return "_server".to_string();
+    }
     name.trim_start_matches(|c| c == '#' || c == '&')
         .replace('/', "_")
         .replace('\\', "_")
@@ -352,30 +380,54 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
 mod tests {
     use super::*;
 
+    fn make_event(
+        seq: u64,
+        node_id: &str,
+        et: EventType,
+        channel: &str,
+        nick: &str,
+        content: &str,
+    ) -> LogEvent {
+        LogEvent {
+            seq,
+            node_id: node_id.to_string(),
+            timestamp: "2026-03-13T14:05:00Z".to_string(),
+            event_type: et as i32,
+            channel: channel.to_string(),
+            nick: nick.to_string(),
+            content: content.to_string(),
+        }
+    }
+
     #[test]
     fn roundtrip_simple() {
-        let event = LogEvent {
-            timestamp: "2026-03-13T14:05:00Z".to_string(),
-            event_type: EventType::Message as i32,
-            channel: "#lobby".to_string(),
-            nick: "alice".to_string(),
-            content: "hello world".to_string(),
-        };
+        let event = make_event(
+            42,
+            "abc123",
+            EventType::Message,
+            "#lobby",
+            "alice",
+            "hello world",
+        );
         let csv = log_event_to_csv(&event);
-        assert_eq!(csv, "2026-03-13T14:05:00Z,message,#lobby,alice,hello world");
+        assert_eq!(
+            csv,
+            "42,abc123,2026-03-13T14:05:00Z,message,#lobby,alice,hello world"
+        );
         let parsed = log_event_from_csv(&csv).unwrap();
         assert_eq!(parsed, event);
     }
 
     #[test]
     fn roundtrip_quoted_content() {
-        let event = LogEvent {
-            timestamp: "2026-03-13T14:05:00Z".to_string(),
-            event_type: EventType::Message as i32,
-            channel: "#lobby".to_string(),
-            nick: "bob".to_string(),
-            content: "hello, \"world\"".to_string(),
-        };
+        let event = make_event(
+            0,
+            "node1",
+            EventType::Message,
+            "#lobby",
+            "bob",
+            "hello, \"world\"",
+        );
         let csv = log_event_to_csv(&event);
         assert!(csv.contains("\"hello, \"\"world\"\"\""));
         let parsed = log_event_from_csv(&csv).unwrap();
@@ -384,15 +436,18 @@ mod tests {
 
     #[test]
     fn roundtrip_empty_content() {
-        let event = LogEvent {
-            timestamp: "2026-03-13T14:05:00Z".to_string(),
-            event_type: EventType::Join as i32,
-            channel: "#lobby".to_string(),
-            nick: "carol".to_string(),
-            content: String::new(),
-        };
+        let event = make_event(1, "node1", EventType::Join, "#lobby", "carol", "");
         let csv = log_event_to_csv(&event);
-        assert_eq!(csv, "2026-03-13T14:05:00Z,join,#lobby,carol,");
+        assert_eq!(csv, "1,node1,2026-03-13T14:05:00Z,join,#lobby,carol,");
+        let parsed = log_event_from_csv(&csv).unwrap();
+        assert_eq!(parsed, event);
+    }
+
+    #[test]
+    fn roundtrip_server_wide_event() {
+        let event = make_event(7, "node2", EventType::Quit, "", "dave", "leaving");
+        let csv = log_event_to_csv(&event);
+        assert_eq!(csv, "7,node2,2026-03-13T14:05:00Z,quit,,dave,leaving");
         let parsed = log_event_from_csv(&csv).unwrap();
         assert_eq!(parsed, event);
     }
@@ -448,5 +503,38 @@ mod tests {
         assert_eq!(sanitize_filename("#lobby"), "lobby");
         assert_eq!(sanitize_filename("&#weird/name"), "weird_name");
         assert_eq!(sanitize_filename("DM_user"), "dm_user");
+        assert_eq!(sanitize_filename(""), "_server");
+    }
+
+    #[test]
+    fn file_logger_stamps_seq_and_node_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let logger = FileLogger::new(Some(dir.path().to_path_buf()), "testnode");
+        logger.log_join("#test", "alice");
+        logger.log_join("#test", "bob");
+
+        let content = std::fs::read_to_string(dir.path().join("test.csv")).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        // header + 2 data rows
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], CSV_HEADER);
+
+        let row0 = log_event_from_csv(lines[1]).unwrap();
+        assert_eq!(row0.seq, 0);
+        assert_eq!(row0.node_id, "testnode");
+
+        let row1 = log_event_from_csv(lines[2]).unwrap();
+        assert_eq!(row1.seq, 1);
+        assert_eq!(row1.node_id, "testnode");
+    }
+
+    #[test]
+    fn file_logger_server_wide_goes_to_server_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let logger = FileLogger::new(Some(dir.path().to_path_buf()), "n1");
+        logger.log_quit("", "dave", "bye");
+
+        assert!(dir.path().join("_server.csv").exists());
+        assert!(!dir.path().join(".csv").exists());
     }
 }

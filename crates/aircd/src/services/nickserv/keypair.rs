@@ -81,7 +81,14 @@ impl KeypairModule {
         let nick_lower = ctx.sender.to_ascii_lowercase();
 
         self.state
-            .set_challenge(ctx.sender, PendingChallenge { nonce, nick_lower })
+            .set_challenge(
+                ctx.sender,
+                PendingChallenge {
+                    nonce,
+                    nick_lower,
+                    created_at: now_unix(),
+                },
+            )
             .await;
 
         ctx.reply(&format!("CHALLENGE {nonce_hex}")).await;
@@ -134,17 +141,21 @@ impl KeypairModule {
         }
 
         let signature = Signature::from_bytes(&sig_bytes.try_into().unwrap());
+        let nonce = challenge.nonce.clone();
 
-        match verifying_key.verify(&challenge.nonce, &signature) {
-            Ok(()) => {
-                ctx.reply("Signature verified. You are now identified.")
-                    .await;
-                info!(nick = %ctx.sender, "NickServ: identified via keypair");
-            }
-            Err(_) => {
-                ctx.reply("Signature verification failed.").await;
-                warn!(nick = %ctx.sender, "NickServ: failed keypair verify");
-            }
+        // Ed25519 verify is CPU-bound — move off the async executor.
+        let verified =
+            tokio::task::spawn_blocking(move || verifying_key.verify(&nonce, &signature).is_ok())
+                .await
+                .unwrap_or(false);
+
+        if verified {
+            ctx.reply("Signature verified. You are now identified.")
+                .await;
+            info!(nick = %ctx.sender, "NickServ: identified via keypair");
+        } else {
+            ctx.reply("Signature verification failed.").await;
+            warn!(nick = %ctx.sender, "NickServ: failed keypair verify");
         }
     }
 }

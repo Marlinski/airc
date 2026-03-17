@@ -10,6 +10,7 @@
 
 use std::fmt;
 
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 // ---------------------------------------------------------------------------
@@ -108,6 +109,8 @@ pub enum Command {
     /// The subcommand is the first parameter (`LS`, `LIST`, `REQ`, `ACK`,
     /// `NAK`, `END`). Additional parameters follow as normal params.
     Cap,
+    /// `AUTHENTICATE` — SASL authentication exchange (IRCv3).
+    Authenticate,
 
     // -- Server -------------------------------------------------------------
     /// `PING` — keepalive ping.
@@ -169,6 +172,7 @@ impl Command {
             "MOTD" => Command::Motd,
             "VERSION" => Command::Version,
             "CAP" => Command::Cap,
+            "AUTHENTICATE" => Command::Authenticate,
             _ => Command::Unknown(s.to_string()),
         }
     }
@@ -204,6 +208,7 @@ impl fmt::Display for Command {
             Command::Motd => f.write_str("MOTD"),
             Command::Version => f.write_str("VERSION"),
             Command::Cap => f.write_str("CAP"),
+            Command::Authenticate => f.write_str("AUTHENTICATE"),
             Command::Numeric(n) => write!(f, "{n:03}"),
             Command::Unknown(s) => f.write_str(s),
         }
@@ -509,6 +514,21 @@ impl fmt::Display for IrcMessage {
         }
 
         Ok(())
+    }
+}
+
+// -- Serde (serialize as IRC wire string) -----------------------------------
+
+impl Serialize for IrcMessage {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for IrcMessage {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(d)?;
+        IrcMessage::parse(&raw).map_err(serde::de::Error::custom)
     }
 }
 

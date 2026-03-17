@@ -1,0 +1,226 @@
+// S2S relay protocol for aircd multi-node communication.
+//
+// All inter-node events are encoded as a RelayEnvelope and published to the
+// Redis "airc:relay" channel as length-prefixed protobuf bytes.
+//
+// Every event carries the originating node_id so receivers can filter out
+// their own messages and correctly attribute remote state updates.
+
+syntax = "proto3";
+
+package airc.relay;
+
+// ---------------------------------------------------------------------------
+// Top-level envelope — wraps every S2S event
+// ---------------------------------------------------------------------------
+
+message RelayEnvelope {
+  // The node that originated this event.
+  string node_id = 1;
+
+  oneof event {
+    ClientIntro          client_intro          =  2;
+    ClientDown           client_down           =  3;
+    NickChange           nick_change           =  4;
+    Join                 join                  =  5;
+    Part                 part                  =  6;
+    Quit                 quit                  =  7;
+    Privmsg              privmsg               =  8;
+    Notice               notice                =  9;
+    Topic                topic                 = 10;
+    Mode                 mode                  = 11;
+    Kick                 kick                  = 12;
+    NodeUp               node_up               = 13;
+    NodeDown             node_down             = 14;
+    CrdtDelta            crdt_delta            = 15;
+    AntiEntropyRequest   anti_entropy_request  = 16;
+    AntiEntropyResponse  anti_entropy_response = 17;
+    StateSnapshot        state_snapshot        = 18;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Client lifecycle
+// ---------------------------------------------------------------------------
+
+// Sent when a client connects and fully registers on the originating node.
+// Receiving nodes insert this client into their users map as Remote.
+message ClientIntro {
+  string client_id = 1;  // stable opaque ID assigned at connection time
+  string nick      = 2;
+  string user      = 3;
+  string host      = 4;
+}
+
+// Sent when a client disconnects from the originating node.
+message ClientDown {
+  string client_id = 1;
+  string reason    = 2;  // optional quit reason
+}
+
+// ---------------------------------------------------------------------------
+// Nick change
+// ---------------------------------------------------------------------------
+
+message NickChange {
+  string client_id = 1;
+  string new_nick  = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Channel events
+// ---------------------------------------------------------------------------
+
+message Join {
+  string client_id = 1;
+  string channel   = 2;
+}
+
+message Part {
+  string client_id = 1;
+  string channel   = 2;
+  string reason    = 3;  // optional
+}
+
+message Quit {
+  string client_id = 1;
+  string reason    = 2;  // optional
+}
+
+// ---------------------------------------------------------------------------
+// Messaging
+// ---------------------------------------------------------------------------
+
+// Target is either a channel name or a specific client_id (for DMs).
+message Privmsg {
+  string client_id = 1;
+  oneof target {
+    string target_channel   = 2;
+    string target_client_id = 3;
+  }
+  string text = 4;
+}
+
+message Notice {
+  string client_id = 1;
+  oneof target {
+    string target_channel   = 2;
+    string target_client_id = 3;
+  }
+  string text = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Channel state changes
+// ---------------------------------------------------------------------------
+
+message Topic {
+  string client_id = 1;
+  string channel   = 2;
+  string text      = 3;
+}
+
+message Mode {
+  string          client_id   = 1;
+  string          target      = 2;  // channel name or nick
+  string          mode_string = 3;  // e.g. "+o", "-v+b"
+  repeated string params      = 4;
+}
+
+message Kick {
+  string client_id        = 1;
+  string channel          = 2;
+  string target_client_id = 3;
+  string reason           = 4;  // optional
+}
+
+// ---------------------------------------------------------------------------
+// Node lifecycle
+// ---------------------------------------------------------------------------
+
+// Broadcast when a node comes online.  Receiving nodes should flood back a
+// ClientIntro for each of their locally connected clients so the new node
+// can populate its users map.
+message NodeUp {
+  string node_id = 1;
+}
+
+// Broadcast (by the watcher process) when a node stops sending heartbeats.
+message NodeDown {
+  string node_id = 1;
+}
+
+// ---------------------------------------------------------------------------
+// CRDT gossip + anti-entropy
+// ---------------------------------------------------------------------------
+
+message CrdtDelta {
+  // Logical CRDT identifier, e.g. "ban:#channel", "nick:alice".
+  string crdt_id = 1;
+  // Bincode-serialised CRDT blob.  Idempotent — merging twice is safe.
+  bytes  payload = 2;
+}
+
+message AntiEntropyRequest {
+  string from_node = 1;
+  // Map from crdt_id → SHA3-256 hash of the sender's serialised CRDT.
+  map<string, bytes> hashes = 2;
+}
+
+message AntiEntropyResponse {
+  string from_node = 1;
+  // Map from crdt_id → full serialised CRDT blob for each diverged CRDT.
+  map<string, bytes> blobs = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Running state snapshot — sent by an existing node when a new node comes up.
+//
+// Carries the full running state of the sending node: connected clients,
+// channel definitions, and memberships.  The receiving node (identified by
+// target_node_id) applies this snapshot to populate its local running state.
+// All other nodes that receive the broadcast ignore it (wrong target_node_id).
+//
+// Compact binary layout:
+//   clients     — one entry per connected client (uid, nick, user, host, modes, away)
+//   channels    — one entry per channel (id, name, topic, modes)
+//   memberships — (client_id, channel_id, member_mode) triples
+// ---------------------------------------------------------------------------
+
+// A single connected client's state.
+message SnapshotClient {
+  uint64 client_id  = 1;  // u64 stable ID
+  string nick       = 2;
+  string user       = 3;
+  string host       = 4;
+  uint32 modes      = 5;  // u32 bitfield (INVISIBLE=1, OPER=2, SERVICE=4)
+  string away       = 6;  // empty string = not away
+}
+
+// A channel's state (without its member list — carried in memberships).
+message SnapshotChannel {
+  uint64 channel_id    = 1;  // fnv1a hash of lowercase channel name
+  string name          = 2;
+  string topic_text    = 3;  // empty = no topic
+  string topic_setter  = 4;
+  uint64 topic_ts      = 5;
+  uint32 mode_flags    = 6;  // packed: bit0=invite_only, bit1=topic_locked, bit2=no_external, bit3=moderated, bit4=secret
+  string mode_key      = 7;  // channel key (+k), empty = none
+  uint32 mode_limit    = 8;  // user limit (+l), 0 = none
+  uint64 created_at    = 9;
+}
+
+// A single channel membership record.
+message SnapshotMembership {
+  uint64 client_id  = 1;
+  uint64 channel_id = 2;
+  uint32 mode       = 3;  // 0=Normal, 1=Voice, 2=Op
+}
+
+// Full running-state snapshot from one node to another.
+message StateSnapshot {
+  string target_node_id          = 1;  // only this node should apply it
+  repeated SnapshotClient     clients     = 2;
+  repeated SnapshotChannel    channels    = 3;
+  repeated SnapshotMembership memberships = 4;
+}

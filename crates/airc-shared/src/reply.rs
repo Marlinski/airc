@@ -102,6 +102,15 @@ pub const RPL_NAMREPLY: u16 = 353;
 pub const RPL_ENDOFNAMES: u16 = 366;
 
 // ===========================================================================
+// Ban list (367–368)
+// ===========================================================================
+
+/// `367` — Ban list entry.
+pub const RPL_BANLIST: u16 = 367;
+/// `368` — End of ban list.
+pub const RPL_ENDOFBANLIST: u16 = 368;
+
+// ===========================================================================
 // MOTD (372, 375–376)
 // ===========================================================================
 
@@ -189,6 +198,29 @@ pub const ERR_UNKNOWNMODE: u16 = 472;
 pub const ERR_NOOPERHOST: u16 = 491;
 
 // ===========================================================================
+// SASL (900–904)
+// ===========================================================================
+
+/// `900` — You are now logged in as <account>.
+pub const RPL_LOGGEDIN: u16 = 900;
+/// `901` — You are now logged out.
+pub const RPL_LOGGEDOUT: u16 = 901;
+/// `902` — SASL authentication aborted.
+pub const ERR_NICKLOCKED: u16 = 902;
+/// `903` — SASL authentication successful.
+pub const RPL_SASLSUCCESS: u16 = 903;
+/// `904` — SASL authentication failed.
+pub const ERR_SASLFAIL: u16 = 904;
+/// `905` — SASL message too long.
+pub const ERR_SASLTOOLONG: u16 = 905;
+/// `906` — SASL authentication aborted.
+pub const ERR_SASLABORTED: u16 = 906;
+/// `907` — Already authenticated.
+pub const ERR_SASLALREADY: u16 = 907;
+/// `908` — Mechanism list (sent in response to AUTHENTICATE when unknown mechanism).
+pub const RPL_SASLMECHS: u16 = 908;
+
+// ===========================================================================
 // Helper
 // ===========================================================================
 
@@ -257,6 +289,10 @@ pub fn reply_name(code: u16) -> &'static str {
         353 => "RPL_NAMREPLY",
         366 => "RPL_ENDOFNAMES",
 
+        // Ban list
+        367 => "RPL_BANLIST",
+        368 => "RPL_ENDOFBANLIST",
+
         // MOTD
         372 => "RPL_MOTD",
         375 => "RPL_MOTDSTART",
@@ -289,6 +325,17 @@ pub fn reply_name(code: u16) -> &'static str {
         481 => "ERR_NOPRIVILEGES",
         482 => "ERR_CHANOPRIVSNEEDED",
         491 => "ERR_NOOPERHOST",
+
+        // SASL
+        900 => "RPL_LOGGEDIN",
+        901 => "RPL_LOGGEDOUT",
+        902 => "ERR_NICKLOCKED",
+        903 => "RPL_SASLSUCCESS",
+        904 => "ERR_SASLFAIL",
+        905 => "ERR_SASLTOOLONG",
+        906 => "ERR_SASLABORTED",
+        907 => "ERR_SASLALREADY",
+        908 => "RPL_SASLMECHS",
 
         _ => "UNKNOWN",
     }
@@ -365,6 +412,15 @@ mod tests {
         assert_eq!(ERR_NOPRIVILEGES, 481);
         assert_eq!(ERR_CHANOPRIVSNEEDED, 482);
         assert_eq!(ERR_NOOPERHOST, 491);
+        assert_eq!(RPL_LOGGEDIN, 900);
+        assert_eq!(RPL_LOGGEDOUT, 901);
+        assert_eq!(ERR_NICKLOCKED, 902);
+        assert_eq!(RPL_SASLSUCCESS, 903);
+        assert_eq!(ERR_SASLFAIL, 904);
+        assert_eq!(ERR_SASLTOOLONG, 905);
+        assert_eq!(ERR_SASLABORTED, 906);
+        assert_eq!(ERR_SASLALREADY, 907);
+        assert_eq!(RPL_SASLMECHS, 908);
         assert_eq!(RPL_YOUREOPER, 381);
     }
 
@@ -451,6 +507,15 @@ mod tests {
             ERR_NOPRIVILEGES,
             ERR_CHANOPRIVSNEEDED,
             ERR_NOOPERHOST,
+            RPL_LOGGEDIN,
+            RPL_LOGGEDOUT,
+            ERR_NICKLOCKED,
+            RPL_SASLSUCCESS,
+            ERR_SASLFAIL,
+            ERR_SASLTOOLONG,
+            ERR_SASLABORTED,
+            ERR_SASLALREADY,
+            RPL_SASLMECHS,
         ];
         for code in codes {
             assert_ne!(

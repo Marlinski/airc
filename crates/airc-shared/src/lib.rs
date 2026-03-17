@@ -39,6 +39,7 @@
 pub mod log;
 pub mod message;
 pub mod prefix;
+pub mod relay;
 pub mod reply;
 pub mod validate;
 
@@ -57,6 +58,10 @@ pub mod aircd_ipc {
 
 pub mod http_api {
     include!(concat!(env!("OUT_DIR"), "/airc.http_api.rs"));
+}
+
+pub mod relay_proto {
+    include!(concat!(env!("OUT_DIR"), "/airc.relay.rs"));
 }
 
 // Re-export core IRC protocol types.

@@ -6,6 +6,7 @@ use airc_shared::reply::*;
 use airc_shared::{Command, IrcMessage};
 
 use crate::client::ClientId;
+use crate::relay::RelayEvent;
 use crate::state::SharedState;
 
 use super::is_channel_name;
@@ -93,6 +94,19 @@ async fn handle_channel_mode(
         return;
     }
 
+    // Check the channel exists and verify the sender is an operator once
+    // upfront, before iterating mode characters (LOCK-10: avoids re-acquiring
+    // the channel lock on every mode flag just to repeat the op check).
+    let channel_snapshot = match state.get_channel(channel_name).await {
+        Some(ch) => ch,
+        None => {
+            client.send_numeric(ERR_NOSUCHCHANNEL, &[channel_name, "No such channel"]);
+            return;
+        }
+    };
+
+    let sender_is_op = channel_snapshot.is_operator(client_id);
+
     let mode_str = &msg.params[1];
     let mut param_idx = 2;
     let mut setting = true;
@@ -109,7 +123,7 @@ async fn handle_channel_mode(
                 };
                 param_idx += 1;
 
-                if !state.is_channel_operator(channel_name, client_id).await {
+                if !sender_is_op {
                     client.send_numeric(
                         ERR_CHANOPRIVSNEEDED,
                         &[channel_name, "You're not channel operator"],
@@ -117,46 +131,53 @@ async fn handle_channel_mode(
                     return;
                 }
 
-                if let Some(_target) = state.find_client_by_nick(target_nick).await {
-                    // Check target is on the channel.
-                    if !state.is_channel_member(channel_name, target_nick).await {
-                        client.send_numeric(
-                            ERR_USERNOTINCHANNEL,
-                            &[target_nick, channel_name, "They aren't on that channel"],
-                        );
-                        return;
-                    }
-
-                    state
-                        .set_channel_operator(channel_name, target_nick, setting)
-                        .await;
-
-                    // Broadcast mode change.
-                    let mode_change = if setting {
-                        format!("+o {target_nick}")
-                    } else {
-                        format!("-o {target_nick}")
-                    };
-                    let mode_msg = IrcMessage {
-                        prefix: Some(client.prefix()),
-                        command: Command::Mode,
-                        params: vec![channel_name.to_string(), mode_change],
-                    };
-                    if let Some(members) = state.channel_members(channel_name).await {
-                        let line: Arc<str> = mode_msg.serialize().into();
-                        for member in &members {
-                            member.send_line(&line);
-                        }
-                    }
-
-                    // Relay MODE change to remote nodes.
-                    state.relay_publish(&mode_msg).await;
-                } else {
+                // Resolve nick → ClientId once; use ClientId for all subsequent checks.
+                let Some(target) = state.find_client_by_nick(target_nick).await else {
                     client.send_numeric(ERR_NOSUCHNICK, &[target_nick, "No such nick"]);
+                    continue;
+                };
+
+                if !channel_snapshot.is_member(target.id) {
+                    client.send_numeric(
+                        ERR_USERNOTINCHANNEL,
+                        &[target_nick, channel_name, "They aren't on that channel"],
+                    );
+                    continue;
                 }
+
+                state
+                    .set_channel_operator(channel_name, target_nick, setting)
+                    .await;
+
+                // Broadcast mode change.
+                let mode_change = if setting {
+                    format!("+o {target_nick}")
+                } else {
+                    format!("-o {target_nick}")
+                };
+                let mode_msg = IrcMessage {
+                    prefix: Some(client.prefix()),
+                    command: Command::Mode,
+                    params: vec![channel_name.to_string(), mode_change.clone()],
+                };
+                if let Some(members) = state.channel_members(channel_name).await {
+                    let line: Arc<str> = mode_msg.serialize().into();
+                    for member in &members {
+                        member.send_line(&line);
+                    }
+                }
+
+                // Relay MODE change to remote nodes.
+                state
+                    .relay_publish(RelayEvent::Mode {
+                        client_id,
+                        target: channel_name.to_string(),
+                        mode_string: mode_change,
+                    })
+                    .await;
             }
             'i' | 't' | 'n' | 'm' | 's' => {
-                if !state.is_channel_operator(channel_name, client_id).await {
+                if !sender_is_op {
                     client.send_numeric(
                         ERR_CHANOPRIVSNEEDED,
                         &[channel_name, "You're not channel operator"],
@@ -175,7 +196,7 @@ async fn handle_channel_mode(
                 let mode_msg = IrcMessage {
                     prefix: Some(client.prefix()),
                     command: Command::Mode,
-                    params: vec![channel_name.to_string(), flag],
+                    params: vec![channel_name.to_string(), flag.clone()],
                 };
                 if let Some(members) = state.channel_members(channel_name).await {
                     let line: Arc<str> = mode_msg.serialize().into();
@@ -185,7 +206,13 @@ async fn handle_channel_mode(
                 }
 
                 // Relay MODE change to remote nodes.
-                state.relay_publish(&mode_msg).await;
+                state
+                    .relay_publish(RelayEvent::Mode {
+                        client_id,
+                        target: channel_name.to_string(),
+                        mode_string: flag,
+                    })
+                    .await;
             }
             'v' => {
                 // Voice/devoice a user.
@@ -195,7 +222,7 @@ async fn handle_channel_mode(
                 };
                 param_idx += 1;
 
-                if !state.is_channel_operator(channel_name, client_id).await {
+                if !sender_is_op {
                     client.send_numeric(
                         ERR_CHANOPRIVSNEEDED,
                         &[channel_name, "You're not channel operator"],
@@ -203,13 +230,18 @@ async fn handle_channel_mode(
                     return;
                 }
 
-                // Check target is on the channel.
-                if !state.is_channel_member(channel_name, target_nick).await {
+                // Resolve nick → ClientId; use it for membership check.
+                let Some(target) = state.find_client_by_nick(target_nick).await else {
+                    client.send_numeric(ERR_NOSUCHNICK, &[target_nick, "No such nick"]);
+                    continue;
+                };
+
+                if !channel_snapshot.is_member(target.id) {
                     client.send_numeric(
                         ERR_USERNOTINCHANNEL,
                         &[target_nick, channel_name, "They aren't on that channel"],
                     );
-                    return;
+                    continue;
                 }
 
                 state
@@ -225,7 +257,7 @@ async fn handle_channel_mode(
                 let mode_msg = IrcMessage {
                     prefix: Some(client.prefix()),
                     command: Command::Mode,
-                    params: vec![channel_name.to_string(), mode_change],
+                    params: vec![channel_name.to_string(), mode_change.clone()],
                 };
                 if let Some(members) = state.channel_members(channel_name).await {
                     let line: Arc<str> = mode_msg.serialize().into();
@@ -235,10 +267,16 @@ async fn handle_channel_mode(
                 }
 
                 // Relay MODE change to remote nodes.
-                state.relay_publish(&mode_msg).await;
+                state
+                    .relay_publish(RelayEvent::Mode {
+                        client_id,
+                        target: channel_name.to_string(),
+                        mode_string: mode_change,
+                    })
+                    .await;
             }
             'k' => {
-                if !state.is_channel_operator(channel_name, client_id).await {
+                if !sender_is_op {
                     client.send_numeric(
                         ERR_CHANOPRIVSNEEDED,
                         &[channel_name, "You're not channel operator"],
@@ -269,7 +307,7 @@ async fn handle_channel_mode(
                 let mode_msg = IrcMessage {
                     prefix: Some(client.prefix()),
                     command: Command::Mode,
-                    params: vec![channel_name.to_string(), mode_change],
+                    params: vec![channel_name.to_string(), mode_change.clone()],
                 };
                 if let Some(members) = state.channel_members(channel_name).await {
                     let line: Arc<str> = mode_msg.serialize().into();
@@ -279,10 +317,16 @@ async fn handle_channel_mode(
                 }
 
                 // Relay MODE change to remote nodes.
-                state.relay_publish(&mode_msg).await;
+                state
+                    .relay_publish(RelayEvent::Mode {
+                        client_id,
+                        target: channel_name.to_string(),
+                        mode_string: mode_change,
+                    })
+                    .await;
             }
             'l' => {
-                if !state.is_channel_operator(channel_name, client_id).await {
+                if !sender_is_op {
                     client.send_numeric(
                         ERR_CHANOPRIVSNEEDED,
                         &[channel_name, "You're not channel operator"],
@@ -308,7 +352,7 @@ async fn handle_channel_mode(
                 let mode_msg = IrcMessage {
                     prefix: Some(client.prefix()),
                     command: Command::Mode,
-                    params: vec![channel_name.to_string(), mode_change],
+                    params: vec![channel_name.to_string(), mode_change.clone()],
                 };
                 if let Some(members) = state.channel_members(channel_name).await {
                     let line: Arc<str> = mode_msg.serialize().into();
@@ -318,7 +362,85 @@ async fn handle_channel_mode(
                 }
 
                 // Relay MODE change to remote nodes.
-                state.relay_publish(&mode_msg).await;
+                state
+                    .relay_publish(RelayEvent::Mode {
+                        client_id,
+                        target: channel_name.to_string(),
+                        mode_string: mode_change,
+                    })
+                    .await;
+            }
+            'b' => {
+                // Ban list mode.
+                // +b <mask>  → add ban
+                // -b <mask>  → remove ban
+                // MODE #chan b (no +/-) → list bans  (handled below as a query)
+
+                // If no +/- was ever set but 'b' is seen with no preceding sign, treat as query.
+                // In practice the loop will have `setting = true` by default.
+                // The convention for ban list query is: `MODE #chan b` (no param).
+                if msg.params.get(param_idx).is_none() {
+                    // Ban list query — send RPL_BANLIST (367) + RPL_ENDOFBANLIST (368).
+                    if let Some(ps) = state.persistent() {
+                        let bans = ps.get_bans(channel_name).await;
+                        for mask in &bans {
+                            // RPL_BANLIST: <channel> <mask> [<setter> <timestamp>]
+                            client.send_numeric(RPL_BANLIST, &[channel_name, mask]);
+                        }
+                    }
+                    client
+                        .send_numeric(RPL_ENDOFBANLIST, &[channel_name, "End of channel ban list"]);
+                    return;
+                }
+
+                if !sender_is_op {
+                    client.send_numeric(
+                        ERR_CHANOPRIVSNEEDED,
+                        &[channel_name, "You're not channel operator"],
+                    );
+                    return;
+                }
+
+                let Some(mask) = msg.params.get(param_idx) else {
+                    client.send_numeric(ERR_NEEDMOREPARAMS, &["MODE", "Not enough parameters"]);
+                    return;
+                };
+                param_idx += 1;
+
+                if setting {
+                    if let Some(ps) = state.persistent() {
+                        ps.add_ban(channel_name, mask.clone()).await;
+                    }
+                } else if let Some(ps) = state.persistent() {
+                    ps.remove_ban(channel_name, mask).await;
+                }
+
+                // Broadcast the ban mode change to channel members.
+                let mode_change = if setting {
+                    format!("+b {mask}")
+                } else {
+                    format!("-b {mask}")
+                };
+                let mode_msg = IrcMessage {
+                    prefix: Some(client.prefix()),
+                    command: Command::Mode,
+                    params: vec![channel_name.to_string(), mode_change.clone()],
+                };
+                if let Some(members) = state.channel_members(channel_name).await {
+                    let line: Arc<str> = mode_msg.serialize().into();
+                    for member in &members {
+                        member.send_line(&line);
+                    }
+                }
+
+                // Relay MODE change to remote nodes.
+                state
+                    .relay_publish(RelayEvent::Mode {
+                        client_id,
+                        target: channel_name.to_string(),
+                        mode_string: mode_change,
+                    })
+                    .await;
             }
             unknown => {
                 let mode_str = unknown.to_string();

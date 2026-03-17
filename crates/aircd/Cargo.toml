@@ -27,6 +27,22 @@ toml.workspace = true
 tokio-rustls.workspace = true
 rustls.workspace = true
 rustls-pemfile.workspace = true
+crdts.workspace = true
+sqlx.workspace = true
+sha3.workspace = true
+bincode.workspace = true
+redis.workspace = true
+base64.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+pbkdf2.workspace = true
+tokio-util.workspace = true
+dashmap.workspace = true
+hex = "0.4"
+subtle = "2"
+
+[dev-dependencies]
+tempfile = "3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -7,6 +7,7 @@
 //! - `GET /ws`                    — WebSocket upgrade for IRC-over-WebSocket
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::extract::ws::{Message, WebSocket};
@@ -17,7 +18,9 @@ use axum::routing::get;
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
-use tracing::{debug, info};
+use tokio::time::interval;
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, info, warn};
 
 use crate::connection::Connection;
 use crate::state::SharedState;
@@ -42,7 +45,7 @@ async fn get_channels(State(state): State<Arc<SharedState>>) -> Json<ChannelsRes
 
 /// Prometheus exposition format metrics.
 async fn get_metrics(State(state): State<Arc<SharedState>>) -> impl IntoResponse {
-    let stats = state.stats().await;
+    let stats = state.prometheus_stats().await;
 
     let mut buf = String::with_capacity(512);
 
@@ -61,11 +64,9 @@ async fn get_metrics(State(state): State<Arc<SharedState>>) -> impl IntoResponse
     buf.push_str("# TYPE aircd_uptime_seconds counter\n");
     buf.push_str(&format!("aircd_uptime_seconds {}\n", stats.uptime_seconds));
 
-    for ch in &stats.channels {
-        let name = &ch.name;
+    for (name, count) in &stats.channel_counts {
         buf.push_str(&format!(
-            "aircd_channel_members{{channel=\"{name}\"}} {}\n",
-            ch.member_count
+            "aircd_channel_members{{channel=\"{name}\"}} {count}\n"
         ));
     }
 
@@ -98,11 +99,37 @@ async fn ws_upgrade(
 /// used by TCP clients:
 /// - Incoming WS text frames → written into a pipe → `BufReader` → `Connection::run_generic()`
 /// - Outgoing IRC lines from `mpsc::Sender<String>` → sent as WS text frames
+///
+/// # Ping / pong idle timeout
+///
+/// A WS `Ping` is sent every 60 seconds via a dedicated control channel.
+/// `last_pong` is updated whenever a `Pong` frame arrives in the reader task.
+/// If no `Pong` is received within 90 seconds of the last ping (60 s interval
+/// + 30 s grace period), the reader task drops the pipe writer (signalling EOF
+/// to the `Connection`) and the writer task sends a `Close` frame.
+///
+/// Constants:
+/// - `PING_INTERVAL` — how often to send a WS Ping (60 s)
+/// - `PONG_TIMEOUT`  — max age of `last_pong` before we close (90 s)
+
+/// Control messages sent from the reader task to the writer task.
+enum WsCtrl {
+    /// Ask the writer to send a WS Ping frame.
+    SendPing,
+    /// Ask the writer to close the WS connection gracefully.
+    Close,
+}
+
 async fn handle_ws_connection(
     socket: WebSocket,
     state: Arc<SharedState>,
     addr: std::net::SocketAddr,
 ) {
+    /// How often to send a WS Ping frame.
+    const PING_INTERVAL: Duration = Duration::from_secs(60);
+    /// Maximum elapsed time since the last Pong before we close the connection.
+    const PONG_TIMEOUT: Duration = Duration::from_secs(90);
+
     let id = state.next_client_id();
     let hostname = addr.ip().to_string();
     info!(client_id = %id, peer = %addr, "new WebSocket connection");
@@ -111,6 +138,11 @@ async fn handle_ws_connection(
 
     // Channel for outgoing IRC lines (Connection → WebSocket).
     let (tx, mut rx) = mpsc::channel::<Arc<str>>(512);
+    let cancel = CancellationToken::new();
+
+    // Channel for control messages (reader task → writer task).
+    // Capacity 4 is more than enough; we only ever send Ping or Close.
+    let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<WsCtrl>(4);
 
     // Pipe for incoming IRC lines (WebSocket → Connection).
     // We write incoming WS text frames (with \n appended) into `pipe_writer`;
@@ -118,43 +150,123 @@ async fn handle_ws_connection(
     let (pipe_reader, mut pipe_writer) = tokio::io::duplex(8192);
 
     // --- Writer task: drain outgoing mpsc and send as WS text frames ---
+    // Also handles Ping and Close control messages from the reader task.
+    let cancel_writer = cancel.clone();
     let writer_handle = tokio::spawn(async move {
-        while let Some(line) = rx.recv().await {
-            if ws_sink
-                .send(Message::Text(line.to_string().into()))
-                .await
-                .is_err()
-            {
-                break;
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancel_writer.cancelled() => break,
+                ctrl = ctrl_rx.recv() => {
+                    match ctrl {
+                        None | Some(WsCtrl::Close) => {
+                            // Send a graceful close frame and stop.
+                            let _ = ws_sink.send(Message::Close(None)).await;
+                            break;
+                        }
+                        Some(WsCtrl::SendPing) => {
+                            if ws_sink.send(Message::Ping(vec![].into())).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                maybe_line = rx.recv() => {
+                    match maybe_line {
+                        None => break,
+                        Some(line) => {
+                            // Convert Arc<str> → &str → Utf8Bytes directly,
+                            // avoiding the intermediate String allocation that
+                            // line.to_string().into() would create.
+                            if ws_sink
+                                .send(Message::Text((&*line).into()))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    }
+                }
             }
         }
         let _ = ws_sink.close().await;
     });
 
     // --- Reader task: read WS frames and pipe into the Connection's reader ---
+    //
+    // Ping/pong idle timeout:
+    //   - A WS Ping is sent every 60 seconds (via ctrl_tx → writer task).
+    //   - `last_pong` is updated whenever a Pong frame arrives.
+    //   - If `last_pong` is older than 90 seconds when the next ping tick
+    //     fires, we drop the pipe (EOF → Connection) and send a Close via
+    //     the control channel.
     let reader_handle = tokio::spawn(async move {
-        while let Some(msg) = ws_stream.next().await {
-            match msg {
-                Ok(Message::Text(text)) => {
-                    // Write the line + \n so BufReader::read_line works.
-                    let mut line = text.to_string();
-                    if !line.ends_with('\n') {
-                        line.push('\n');
+        let mut ping_ticker = interval(PING_INTERVAL);
+        // Consume the immediate first tick — we do not want to ping the client
+        // the instant the connection is established.
+        ping_ticker.tick().await;
+
+        let mut last_pong: Instant = Instant::now();
+        // True once we have sent at least one ping and are awaiting a pong.
+        let mut waiting_for_pong = false;
+
+        loop {
+            tokio::select! {
+                biased;
+
+                // Ping ticker fires every 60 seconds.
+                _ = ping_ticker.tick() => {
+                    // Check for idle timeout first.
+                    if waiting_for_pong && last_pong.elapsed() > PONG_TIMEOUT {
+                        warn!(
+                            client_id = %id,
+                            "WebSocket idle timeout — no pong received, closing connection",
+                        );
+                        // Drop the pipe to signal EOF to the Connection.
+                        drop(pipe_writer);
+                        // Ask the writer task to send a Close frame.
+                        let _ = ctrl_tx.send(WsCtrl::Close).await;
+                        return;
                     }
-                    if pipe_writer.write_all(line.as_bytes()).await.is_err() {
+                    // Send a Ping frame through the writer task.
+                    waiting_for_pong = true;
+                    if ctrl_tx.send(WsCtrl::SendPing).await.is_err() {
                         break;
                     }
+                    debug!(client_id = %id, "WebSocket ping sent");
                 }
-                Ok(Message::Close(_)) => break,
-                Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {
-                    // axum handles ping/pong automatically.
-                }
-                Ok(Message::Binary(_)) => {
-                    debug!(client_id = %id, "ignoring binary WS frame");
-                }
-                Err(e) => {
-                    debug!(client_id = %id, error = %e, "WS read error");
-                    break;
+
+                maybe_msg = ws_stream.next() => {
+                    match maybe_msg {
+                        None => break,
+                        Some(Ok(Message::Text(text))) => {
+                            // Write the line + \n so BufReader::read_line works.
+                            let mut line = text.to_string();
+                            if !line.ends_with('\n') {
+                                line.push('\n');
+                            }
+                            if pipe_writer.write_all(line.as_bytes()).await.is_err() {
+                                break;
+                            }
+                        }
+                        Some(Ok(Message::Close(_))) => break,
+                        Some(Ok(Message::Pong(_))) => {
+                            last_pong = Instant::now();
+                            waiting_for_pong = false;
+                            debug!(client_id = %id, "WebSocket pong received");
+                        }
+                        Some(Ok(Message::Ping(_))) => {
+                            // axum handles pong replies automatically.
+                        }
+                        Some(Ok(Message::Binary(_))) => {
+                            debug!(client_id = %id, "ignoring binary WS frame");
+                        }
+                        Some(Err(e)) => {
+                            debug!(client_id = %id, error = %e, "WS read error");
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -164,7 +276,8 @@ async fn handle_ws_connection(
 
     // --- Run the IRC Connection over the pipe reader + mpsc sender ---
     let conn = Connection::new(id, (*state).clone(), hostname);
-    conn.run_generic(BufReader::new(pipe_reader), tx).await;
+    conn.run_generic(BufReader::new(pipe_reader), tx, cancel)
+        .await;
 
     // Connection is done — clean up the WS tasks.
     reader_handle.abort();

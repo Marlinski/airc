@@ -1,8 +1,9 @@
 //! IRC channel state and operations.
 
 use std::collections::{HashMap, HashSet};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::client::{ClientId, ClientKind, NodeId};
+use crate::client::ClientId;
 
 // ---------------------------------------------------------------------------
 // Channel modes
@@ -11,24 +12,16 @@ use crate::client::{ClientId, ClientKind, NodeId};
 /// Per-channel mode flags.
 #[derive(Debug, Clone, Default)]
 pub struct ChannelModes {
-    /// `+i` — invite-only.
     pub invite_only: bool,
-    /// `+t` — only operators may set the topic.
     pub topic_locked: bool,
-    /// `+n` — no external messages (must be a member to send).
     pub no_external: bool,
-    /// `+m` — moderated (only voiced/opped users can speak).
     pub moderated: bool,
-    /// `+s` — secret (channel hidden from LIST/WHOIS for non-members).
     pub secret: bool,
-    /// `+k` — channel key (password).
     pub key: Option<String>,
-    /// `+l` — member limit.
     pub limit: Option<usize>,
 }
 
 impl ChannelModes {
-    /// Render the current mode string (e.g. `+intms`).
     pub fn to_mode_string(&self) -> String {
         let mut s = String::from("+");
         if self.invite_only {
@@ -57,39 +50,119 @@ impl ChannelModes {
 }
 
 // ---------------------------------------------------------------------------
+// Member mode
+// ---------------------------------------------------------------------------
+
+/// The privilege level a client holds in a channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MemberMode {
+    #[default]
+    Normal,
+    /// `+v` — voiced; can speak in moderated (+m) channels.
+    Voice,
+    /// `+o` — channel operator.
+    Op,
+}
+
+impl MemberMode {
+    /// IRC prefix character (`@` for op, `+` for voice, empty for normal).
+    pub fn prefix(self) -> &'static str {
+        match self {
+            MemberMode::Op => "@",
+            MemberMode::Voice => "+",
+            MemberMode::Normal => "",
+        }
+    }
+
+    pub fn is_op(self) -> bool {
+        self == MemberMode::Op
+    }
+    pub fn is_voice(self) -> bool {
+        self == MemberMode::Voice
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Membership
+// ---------------------------------------------------------------------------
+
+/// A single client's membership record in a channel.
+#[derive(Debug, Clone)]
+pub struct Membership {
+    pub client_id: ClientId,
+    pub mode: MemberMode,
+    pub joined_at: u64,
+}
+
+impl Membership {
+    fn new(client_id: ClientId) -> Self {
+        let joined_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        Self {
+            client_id,
+            mode: MemberMode::Normal,
+            joined_at,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Channel
 // ---------------------------------------------------------------------------
 
 /// A single IRC channel.
-///
-/// Members are keyed by lowercase nick and carry a [`ClientKind`] that tells
-/// us whether the user is local (has a `ClientId` → `ClientHandle`) or remote
-/// (reachable via relay to a `NodeId`).
 #[derive(Debug, Clone)]
 pub struct Channel {
-    /// Canonical channel name (preserves original casing).
     pub name: String,
-    /// Current topic: `(text, setter_nick, unix_timestamp)`.
     pub topic: Option<(String, String, u64)>,
-    /// All members: lowercase nick → local or remote.
-    pub members: HashMap<String, ClientKind>,
-    /// Operators: lowercase nicks (works uniformly for local and remote).
-    pub operators: HashSet<String>,
-    /// Voiced users: lowercase nicks (can speak in +m channels).
-    pub voiced: HashSet<String>,
-    /// Channel mode flags.
+    /// All members keyed by ClientId; includes mode and join timestamp.
+    pub members: HashMap<ClientId, Membership>,
     pub modes: ChannelModes,
-    /// Nicks that have been invited to this channel (for `+i` enforcement).
-    /// Stored as lowercase nicks so lookup is case-insensitive.
-    pub invited: HashSet<String>,
-    /// Unix timestamp when the channel was created.
+    /// Pre-join invite list (for +i enforcement).
+    pub invited: HashSet<ClientId>,
     pub created_at: u64,
 }
 
+/// A lightweight snapshot of a channel's read-only state, excluding the
+/// `members` HashMap (which can hold tens of thousands of entries).
+///
+/// Use this instead of a full `Channel` clone whenever the caller only needs
+/// mode flags, topic, or invite information — not per-member queries.
+/// Per-member queries (`is_member`, `is_operator`, `is_voiced`) should use
+/// the targeted `SharedState::is_channel_member_id` / `*_operator_id` /
+/// `*_voiced_id` helpers that acquire the channel lock only for that lookup.
+#[derive(Debug, Clone)]
+pub struct ChannelView {
+    pub name: String,
+    pub topic: Option<(String, String, u64)>,
+    pub modes: ChannelModes,
+    pub invited: HashSet<ClientId>,
+    pub created_at: u64,
+    pub member_count: usize,
+}
+
+impl ChannelView {
+    /// Build a `ChannelView` from a channel guard without cloning `members`.
+    pub fn from_channel(ch: &Channel) -> Self {
+        Self {
+            name: ch.name.clone(),
+            topic: ch.topic.clone(),
+            modes: ch.modes.clone(),
+            invited: ch.invited.clone(),
+            created_at: ch.created_at,
+            member_count: ch.member_count(),
+        }
+    }
+
+    pub fn is_invited(&self, id: ClientId) -> bool {
+        self.invited.contains(&id)
+    }
+}
+
 impl Channel {
-    /// Create a new, empty channel with default modes (`+nt`).
     pub fn new(name: String) -> Self {
-        use std::time::{SystemTime, UNIX_EPOCH};
         let created_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -98,8 +171,6 @@ impl Channel {
             name,
             topic: None,
             members: HashMap::new(),
-            operators: HashSet::new(),
-            voiced: HashSet::new(),
             modes: ChannelModes {
                 no_external: true,
                 topic_locked: true,
@@ -110,175 +181,77 @@ impl Channel {
         }
     }
 
-    /// Add a member by nick. Returns `true` if the member was newly inserted.
-    pub fn add_member(&mut self, nick: &str, kind: ClientKind) -> bool {
-        let nick_lower = nick.to_ascii_lowercase();
-        if self.members.contains_key(&nick_lower) {
+    /// Add a member with Normal mode. Returns `true` if newly inserted.
+    pub fn add_member(&mut self, id: ClientId) -> bool {
+        if self.members.contains_key(&id) {
             return false;
         }
-        self.members.insert(nick_lower, kind);
+        self.members.insert(id, Membership::new(id));
         true
     }
 
-    /// Remove a member by nick (also strips operator/voice status). Returns `true` if present.
-    pub fn remove_member(&mut self, nick: &str) -> bool {
-        let nick_lower = nick.to_ascii_lowercase();
-        self.operators.remove(&nick_lower);
-        self.voiced.remove(&nick_lower);
-        self.members.remove(&nick_lower).is_some()
+    /// Remove a member. Returns `true` if they were present.
+    pub fn remove_member_by_id(&mut self, id: ClientId) -> bool {
+        self.members.remove(&id).is_some()
     }
 
-    /// Remove a member by `ClientId` (for local client cleanup).
-    /// Returns the nick if found and removed.
-    pub fn remove_member_by_id(&mut self, id: ClientId) -> Option<String> {
-        let nick = self
-            .members
-            .iter()
-            .find(|(_, kind)| matches!(kind, ClientKind::Local(cid) if *cid == id))
-            .map(|(nick, _)| nick.clone());
-        if let Some(ref nick) = nick {
-            self.operators.remove(nick);
-            self.voiced.remove(nick);
-            self.members.remove(nick);
+    pub fn is_member(&self, id: ClientId) -> bool {
+        self.members.contains_key(&id)
+    }
+
+    pub fn is_operator(&self, id: ClientId) -> bool {
+        self.members.get(&id).is_some_and(|m| m.mode.is_op())
+    }
+
+    pub fn is_voiced(&self, id: ClientId) -> bool {
+        self.members.get(&id).is_some_and(|m| m.mode.is_voice())
+    }
+
+    pub fn set_operator(&mut self, id: ClientId, grant: bool) -> bool {
+        if let Some(m) = self.members.get_mut(&id) {
+            m.mode = if grant {
+                MemberMode::Op
+            } else {
+                MemberMode::Normal
+            };
+            true
+        } else {
+            false
         }
-        nick
     }
 
-    /// Whether a nick is a member of this channel.
-    pub fn is_member_nick(&self, nick: &str) -> bool {
-        self.members.contains_key(&nick.to_ascii_lowercase())
-    }
-
-    /// Whether a `ClientId` is a member of this channel.
-    pub fn is_member_id(&self, id: ClientId) -> bool {
-        self.members
-            .values()
-            .any(|kind| matches!(kind, ClientKind::Local(cid) if *cid == id))
-    }
-
-    /// Whether a nick is an operator in this channel.
-    #[allow(dead_code)] // Used when relay is wired up.
-    pub fn is_operator(&self, nick: &str) -> bool {
-        self.operators.contains(&nick.to_ascii_lowercase())
-    }
-
-    /// Whether a nick is voiced in this channel.
-    #[allow(dead_code)] // Available for direct queries.
-    pub fn is_voiced(&self, nick: &str) -> bool {
-        self.voiced.contains(&nick.to_ascii_lowercase())
-    }
-
-    /// Whether a nick can speak in this channel (operator, voiced, or channel is not moderated).
-    pub fn can_speak(&self, nick: &str) -> bool {
-        if !self.modes.moderated {
-            return true;
+    pub fn set_voice(&mut self, id: ClientId, grant: bool) -> bool {
+        if let Some(m) = self.members.get_mut(&id) {
+            m.mode = if grant {
+                MemberMode::Voice
+            } else {
+                MemberMode::Normal
+            };
+            true
+        } else {
+            false
         }
-        let nick_lower = nick.to_ascii_lowercase();
-        self.operators.contains(&nick_lower) || self.voiced.contains(&nick_lower)
     }
 
-    /// Whether a `ClientId` is an operator in this channel.
-    pub fn is_operator_id(&self, id: ClientId) -> bool {
-        // Find the nick for this ClientId, then check operators.
-        self.members.iter().any(|(nick, kind)| {
-            matches!(kind, ClientKind::Local(cid) if *cid == id) && self.operators.contains(nick)
-        })
-    }
-
-    /// Set the channel topic.
     pub fn set_topic(&mut self, text: String, setter: String, timestamp: u64) {
         self.topic = Some((text, setter, timestamp));
     }
 
-    /// Number of members (local + remote).
     pub fn member_count(&self) -> usize {
         self.members.len()
     }
 
-    /// All local `ClientId`s in this channel.
-    pub fn local_client_ids(&self) -> Vec<ClientId> {
-        self.members
-            .values()
-            .filter_map(|kind| match kind {
-                ClientKind::Local(id) => Some(*id),
-                ClientKind::Remote(_) => None,
-            })
-            .collect()
+    pub fn all_member_ids(&self) -> Vec<ClientId> {
+        self.members.keys().copied().collect()
     }
 
-    /// All unique remote `NodeId`s that have members in this channel.
-    #[allow(dead_code)] // Used when relay is wired up.
-    pub fn remote_node_ids(&self) -> HashSet<&NodeId> {
-        self.members
-            .values()
-            .filter_map(|kind| match kind {
-                ClientKind::Remote(node_id) => Some(node_id),
-                ClientKind::Local(_) => None,
-            })
-            .collect()
+    pub fn add_invite(&mut self, id: ClientId) {
+        self.invited.insert(id);
     }
-
-    /// Snapshot of all member nicks.
-    #[allow(dead_code)] // Used when relay is wired up.
-    pub fn member_nicks(&self) -> Vec<String> {
-        self.members.keys().cloned().collect()
+    pub fn is_invited(&self, id: ClientId) -> bool {
+        self.invited.contains(&id)
     }
-
-    /// Snapshot of member nicks with status prefix (`@` for ops, `+` for voiced).
-    pub fn nicks_with_prefix(&self) -> Vec<String> {
-        self.members
-            .keys()
-            .map(|nick| {
-                let prefix = if self.operators.contains(nick) {
-                    "@"
-                } else if self.voiced.contains(nick) {
-                    "+"
-                } else {
-                    ""
-                };
-                format!("{prefix}{nick}")
-            })
-            .collect()
-    }
-
-    /// Find the nick (lowercase) for a given `ClientId`, if they are a local member.
-    pub fn nick_for_id(&self, id: ClientId) -> Option<&str> {
-        self.members
-            .iter()
-            .find(|(_, kind)| matches!(kind, ClientKind::Local(cid) if *cid == id))
-            .map(|(nick, _)| nick.as_str())
-    }
-
-    /// Add a nick to the invite list (case-insensitive).
-    pub fn add_invite(&mut self, nick: &str) {
-        self.invited.insert(nick.to_ascii_lowercase());
-    }
-
-    /// Check whether a nick has been invited (case-insensitive).
-    pub fn is_invited(&self, nick: &str) -> bool {
-        self.invited.contains(&nick.to_ascii_lowercase())
-    }
-
-    /// Remove a nick from the invite list after they join (case-insensitive).
-    pub fn clear_invite(&mut self, nick: &str) {
-        self.invited.remove(&nick.to_ascii_lowercase());
-    }
-
-    /// Remove all members belonging to a specific remote node.
-    /// Returns the list of removed nicks.
-    #[allow(dead_code)] // Used when relay is wired up.
-    pub fn remove_node_members(&mut self, node_id: &NodeId) -> Vec<String> {
-        let to_remove: Vec<String> = self
-            .members
-            .iter()
-            .filter(|(_, kind)| matches!(kind, ClientKind::Remote(nid) if nid == node_id))
-            .map(|(nick, _)| nick.clone())
-            .collect();
-        for nick in &to_remove {
-            self.operators.remove(nick);
-            self.voiced.remove(nick);
-            self.members.remove(nick);
-        }
-        to_remove
+    pub fn clear_invite(&mut self, id: ClientId) {
+        self.invited.remove(&id);
     }
 }

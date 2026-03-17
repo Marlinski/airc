@@ -38,10 +38,11 @@ mod config;
 mod conn;
 mod error;
 mod event;
+mod handler;
 mod state;
 
 pub use client::IrcClient;
-pub use config::{ClientConfig, DEFAULT_NICK, DEFAULT_SERVER, TlsMode};
+pub use config::{ClientConfig, DEFAULT_NICK, DEFAULT_SERVER, SaslConfig, SaslMechanism, TlsMode};
 pub use error::ClientError;
 pub use event::{ChannelMessage, IrcEvent, MessageKind, new_channel_message};
 pub use state::{ChannelStatus, ClientState};

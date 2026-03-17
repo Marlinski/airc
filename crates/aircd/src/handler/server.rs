@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use airc_shared::reply::*;
 use airc_shared::{Command, IrcMessage};
+use subtle::ConstantTimeEq;
 use tracing::debug;
 
 use crate::client::ClientId;
@@ -51,10 +52,12 @@ pub async fn handle_oper(state: &SharedState, client_id: ClientId, msg: &airc_sh
     let password = &msg.params[1];
 
     let config = state.config();
+    // Find the operator entry by name (name is not secret, O(n) linear is fine).
+    // Password comparison is done in constant time to prevent timing side-channels.
     let oper_entry = config
         .operators
         .iter()
-        .find(|o| o.name == *name && o.password == *password);
+        .find(|o| o.name == *name && bool::from(o.password.as_bytes().ct_eq(password.as_bytes())));
 
     match oper_entry {
         Some(entry) => {
@@ -183,9 +186,9 @@ pub async fn handle_lusers(state: &SharedState, client_id: ClientId) {
 
 /// Send LUSERS numerics (251-255, 265-266) to a client.
 pub async fn send_lusers(state: &SharedState, client: &crate::client::ClientHandle) {
-    let user_count = state.local_client_count().await;
-    let channel_count = state.channel_count().await;
-    let oper_count = state.oper_count().await;
+    // Single call collects user_count, channel_count, and oper_count in two
+    // passes instead of three separate lock acquisitions (LOCK-12 / ON-3).
+    let (user_count, channel_count, oper_count) = state.server_counts().await;
 
     // 251 RPL_LUSERCLIENT: "There are <n> users and 0 services on 1 servers"
     client.send_numeric(

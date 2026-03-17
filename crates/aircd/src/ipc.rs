@@ -9,11 +9,13 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use prost::Message;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
+use tokio::time;
 use tracing::{debug, error, info, warn};
 
 use airc_shared::aircd_ipc::aircd_request::Command;
@@ -80,13 +82,22 @@ pub fn start_listener(state: SharedState) -> Result<(mpsc::Receiver<IpcSignal>, 
     Ok((rx, path_clone))
 }
 
+/// Timeout for reading a request frame from an IPC client.
+/// Stalled IPC clients would otherwise hold a handler task open indefinitely.
+const IPC_READ_TIMEOUT_SECS: u64 = 5;
+
 /// Handle a single IPC connection.
 async fn handle_ipc_connection(
     mut stream: UnixStream,
     state: &SharedState,
     shutdown_tx: &mpsc::Sender<IpcSignal>,
 ) -> Result<(), String> {
-    let req: AircdRequest = read_frame(&mut stream).await?;
+    let req: AircdRequest = time::timeout(
+        Duration::from_secs(IPC_READ_TIMEOUT_SECS),
+        read_frame(&mut stream),
+    )
+    .await
+    .map_err(|_| "IPC read timeout".to_string())??;
 
     let Some(command) = req.command else {
         let resp = aircd_response_err("empty request (no command)");
@@ -161,7 +172,10 @@ async fn read_frame<M: Message + Default>(stream: &mut UnixStream) -> Result<M, 
         .map_err(|e| format!("read length: {e}"))?;
     let len = u32::from_be_bytes(len_buf) as usize;
 
-    if len > 16 * 1024 * 1024 {
+    // Limit frame size to 64 KiB. IPC messages (shutdown/stats) are tiny;
+    // a larger limit would allow a local attacker to force a multi-MiB
+    // allocation per connection (MISC-4).
+    if len > 65536 {
         return Err(format!("frame too large: {len} bytes"));
     }
 

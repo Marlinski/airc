@@ -1,0 +1,19 @@
+[package]
+name = "aircd-redis-logger"
+description = "Redis Pub/Sub logging sidecar for aircd clusters — subscribes to airc:relay and writes CSV event logs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "aircd-redis-logger"
+path = "src/main.rs"
+
+[dependencies]
+airc-shared.workspace = true
+prost.workspace = true
+redis.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+futures-util.workspace = true

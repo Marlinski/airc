@@ -15,15 +15,17 @@ mod config;
 mod connection;
 mod handler;
 mod ipc;
-mod logger;
+mod persist;
 mod relay;
+mod sasl;
 mod server;
 mod services;
 mod state;
+mod util;
 mod web;
 
 #[cfg(test)]
-mod relay_tests;
+mod tests;
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -269,7 +271,27 @@ fn run_server_foreground(cfg: ServerConfig) {
     let http_port = cfg.http_port;
 
     // Construct the relay backend (NoopRelay for single-instance mode).
-    let relay: Arc<dyn relay::Relay> = Arc::new(relay::NoopRelay::new());
+    let log_dir = cfg.log_dir.as_ref().map(std::path::PathBuf::from);
+    let relay: Arc<dyn relay::Relay> = match cfg.relay.backend.as_str() {
+        "redis" => {
+            let url = cfg
+                .relay
+                .redis_url
+                .as_deref()
+                .unwrap_or("redis://127.0.0.1:6379");
+            match relay::RedisRelay::new(url) {
+                Ok(r) => {
+                    tracing::info!("relay: redis backend at {url}");
+                    Arc::new(r)
+                }
+                Err(e) => {
+                    eprintln!("failed to create redis relay: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        _ => Arc::new(relay::NoopRelay::new(log_dir)),
+    };
 
     let rt = tokio::runtime::Runtime::new().unwrap_or_else(|e| {
         eprintln!("failed to create tokio runtime: {e}");
@@ -280,13 +302,24 @@ fn run_server_foreground(cfg: ServerConfig) {
         let state = state::SharedState::new(cfg.clone(), relay);
         state.create_default_channels().await;
 
+        // Open CRDT-backed persistent state (SQLite).
+        let db_path = cfg.services.data_dir.join("aircd.db");
+        let node_id = cfg.server_name.clone();
+        match persist::PersistentState::open(&db_path, node_id).await {
+            Ok(ps) => {
+                state.set_persistent(ps);
+                tracing::info!(path = %db_path.display(), "persistent state opened");
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "failed to open persistent state — running without persistence");
+            }
+        }
+
         // Initialize embedded services (NickServ / ChanServ).
-        let data_dir = cfg.services.data_dir.clone();
         let svc_state = std::sync::Arc::new(services::ServicesState::new(
             &cfg.services,
             state.clone(),
-            &data_dir,
-        ));
+        ).await);
         state.set_services(svc_state);
         tracing::info!("embedded services initialized (NickServ, ChanServ)");
 

@@ -65,6 +65,7 @@ impl IrcClient {
 
         // Wait for registration to complete (RPL_WELCOME).
         let timeout = Duration::from_secs(10);
+        let mut pre_reg_events: Vec<IrcEvent> = Vec::new();
         let registered = tokio::time::timeout(timeout, async {
             loop {
                 match event_rx.recv().await {
@@ -75,9 +76,10 @@ impl IrcClient {
                     Some(IrcEvent::Disconnected { reason }) => {
                         return Err(ClientError::Registration(reason));
                     }
-                    Some(_) => {
-                        // Ignore other events during registration.
-                        continue;
+                    Some(ev) => {
+                        // Buffer SASL events (and anything else) so we can
+                        // re-emit them after the client is constructed.
+                        pre_reg_events.push(ev);
                     }
                     None => {
                         return Err(ClientError::Registration(
@@ -99,7 +101,8 @@ impl IrcClient {
         // We drain events until we see MotdEnd (376) or hit a short timeout
         // (some servers may not send a MOTD at all).
         let mut motd_lines = Vec::new();
-        let mut pending_events = Vec::new();
+        // Start with any events buffered before registration completed (e.g. SaslLoggedIn).
+        let mut pending_events = pre_reg_events;
         let motd_timeout = Duration::from_secs(3);
         let _ = tokio::time::timeout(motd_timeout, async {
             loop {

@@ -8,6 +8,7 @@ fn main() -> Result<()> {
         format!("{proto_dir}/aircd_http_api.proto"),
         format!("{proto_dir}/airc_ipc.proto"),
         format!("{proto_dir}/aircd_ipc.proto"),
+        format!("{proto_dir}/relay.proto"),
     ];
 
     let mut config = prost_build::Config::new();
@@ -59,6 +60,29 @@ fn main() -> Result<()> {
     config.type_attribute("airc.aircd_ipc.ShutdownResponse", "#[serde(default)]");
     config.type_attribute("airc.aircd_ipc.StatsResponse", "#[serde(default)]");
     config.type_attribute("airc.aircd_ipc.ChannelInfo", "#[serde(default)]");
+
+    // relay.proto messages
+    config.type_attribute("airc.relay.RelayEnvelope", "#[serde(default)]");
+    config.type_attribute("airc.relay.ClientIntro", "#[serde(default)]");
+    config.type_attribute("airc.relay.ClientDown", "#[serde(default)]");
+    config.type_attribute("airc.relay.NickChange", "#[serde(default)]");
+    config.type_attribute("airc.relay.Join", "#[serde(default)]");
+    config.type_attribute("airc.relay.Part", "#[serde(default)]");
+    config.type_attribute("airc.relay.Quit", "#[serde(default)]");
+    config.type_attribute("airc.relay.Privmsg", "#[serde(default)]");
+    config.type_attribute("airc.relay.Notice", "#[serde(default)]");
+    config.type_attribute("airc.relay.Topic", "#[serde(default)]");
+    config.type_attribute("airc.relay.Mode", "#[serde(default)]");
+    config.type_attribute("airc.relay.Kick", "#[serde(default)]");
+    config.type_attribute("airc.relay.NodeUp", "#[serde(default)]");
+    config.type_attribute("airc.relay.NodeDown", "#[serde(default)]");
+    config.type_attribute("airc.relay.CrdtDelta", "#[serde(default)]");
+    config.type_attribute("airc.relay.AntiEntropyRequest", "#[serde(default)]");
+    config.type_attribute("airc.relay.AntiEntropyResponse", "#[serde(default)]");
+    config.type_attribute("airc.relay.StateSnapshot", "#[serde(default)]");
+    config.type_attribute("airc.relay.SnapshotClient", "#[serde(default)]");
+    config.type_attribute("airc.relay.SnapshotChannel", "#[serde(default)]");
+    config.type_attribute("airc.relay.SnapshotMembership", "#[serde(default)]");
 
     config.compile_protos(protos, &[proto_dir])?;
 

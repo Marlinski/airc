@@ -4,10 +4,11 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use subtle::ConstantTimeEq;
 use tracing::{info, warn};
 
 use crate::services::module::{CommandContext, ServiceModule};
-use crate::services::nickserv::{Identity, NickServState, now_unix, simple_hash};
+use crate::services::nickserv::{Identity, NickServState, hash_password, now_unix};
 
 /// Identity management module for NickServ.
 pub struct IdentityModule {
@@ -36,7 +37,7 @@ impl IdentityModule {
 
         let identity = Identity {
             nick: ctx.sender.to_string(),
-            password_hash: Some(simple_hash(password)),
+            password_hash: Some(hash_password(password)),
             pubkey_hex: None,
             registered_at: now_unix(),
             reputation: 0,
@@ -62,7 +63,12 @@ impl IdentityModule {
                 ctx.reply("This nickname is not registered.").await;
             }
             Some(identity) => match &identity.password_hash {
-                Some(hash) if *hash == simple_hash(password) => {
+                Some(hash)
+                    if hash
+                        .as_bytes()
+                        .ct_eq(hash_password(password).as_bytes())
+                        .into() =>
+                {
                     ctx.reply("You are now identified.").await;
                     info!(nick = %ctx.sender, "NickServ: identified via password");
                 }
@@ -134,7 +140,11 @@ impl IdentityModule {
 
         // Verify password.
         match &identity.password_hash {
-            Some(hash) if *hash == simple_hash(password) => {}
+            Some(hash)
+                if hash
+                    .as_bytes()
+                    .ct_eq(hash_password(password).as_bytes())
+                    .into() => {}
             Some(_) => {
                 ctx.reply("Incorrect password.").await;
                 warn!(nick = %ctx.sender, target = %nick, "NickServ: failed GHOST password");
@@ -148,16 +158,15 @@ impl IdentityModule {
         }
 
         // Forcibly disconnect the client using that nick via SharedState.
-        let kill_reason = format!(
-            "Killed (NickServ (GHOST command used by {}))",
-            ctx.sender
-        );
+        let kill_reason = format!("Killed (NickServ (GHOST command used by {}))", ctx.sender);
         match self.state.shared_state().force_disconnect(nick).await {
             Some((disconnected, peers)) => {
                 // Send ERROR to the disconnected client.
-                let error_line: Arc<str> =
-                    format!("ERROR :Killed (NickServ (GHOST command used by {}))\r\n", ctx.sender)
-                        .into();
+                let error_line: Arc<str> = format!(
+                    "ERROR :Killed (NickServ (GHOST command used by {}))\r\n",
+                    ctx.sender
+                )
+                .into();
                 disconnected.send_line(&error_line);
 
                 // Broadcast QUIT to peers.
@@ -168,11 +177,8 @@ impl IdentityModule {
                     peer.send_line(&quit_line);
                 }
 
-                ctx.reply(&format!(
-                    "Ghost of \x02{}\x02 has been disconnected.",
-                    nick
-                ))
-                .await;
+                ctx.reply(&format!("Ghost of \x02{}\x02 has been disconnected.", nick))
+                    .await;
                 info!(
                     sender = %ctx.sender,
                     target = %nick,

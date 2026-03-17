@@ -5,8 +5,9 @@ use std::sync::Arc;
 use airc_shared::reply::*;
 use airc_shared::{Command, IrcMessage};
 
-use crate::client::{ClientId, ClientKind};
-use crate::state::SharedState;
+use crate::client::ClientId;
+use crate::relay::RelayEvent;
+use crate::state::{ChannelSendResult, SharedState};
 
 use super::is_channel_name;
 
@@ -41,40 +42,45 @@ async fn route_message(state: &SharedState, client_id: ClientId, msg: &IrcMessag
     .with_prefix(client.prefix());
 
     if is_channel_name(target) {
-        // +n enforcement: non-members cannot send to channels with no-external mode.
-        if state.channel_is_no_external(target).await
-            && !state.is_channel_member(target, &client.info.nick).await
-        {
-            if cmd == Command::Privmsg {
-                client.send_numeric(ERR_CANNOTSENDTOCHAN, &[target, "Cannot send to channel"]);
+        // Single lock acquisition: checks +n, +m, and collects fan-out targets.
+        match state.check_channel_send(target, client_id).await {
+            ChannelSendResult::NoSuchChannel => {
+                if cmd == Command::Privmsg {
+                    client.send_numeric(ERR_NOSUCHCHANNEL, &[target, "No such channel"]);
+                }
             }
-            return;
-        }
-
-        // +m enforcement: only voiced/opped users can speak in moderated channels.
-        if !state.can_speak_in_channel(target, &client.info.nick).await {
-            if cmd == Command::Privmsg {
-                client.send_numeric(ERR_CANNOTSENDTOCHAN, &[target, "Cannot send to channel"]);
+            ChannelSendResult::NoExternal => {
+                if cmd == Command::Privmsg {
+                    client.send_numeric(ERR_CANNOTSENDTOCHAN, &[target, "Cannot send to channel"]);
+                }
             }
-            return;
-        }
-
-        // Fan out to all channel members except the sender.
-        match state.channel_members_except(target, client_id).await {
-            Some(members) => {
+            ChannelSendResult::Moderated => {
+                if cmd == Command::Privmsg {
+                    client.send_numeric(ERR_CANNOTSENDTOCHAN, &[target, "Cannot send to channel"]);
+                }
+            }
+            ChannelSendResult::Ok(members) => {
                 let line: Arc<str> = outgoing.serialize().into();
                 for member in &members {
                     member.send_line(&line);
                 }
-                state.relay_publish(&outgoing).await;
-                match cmd {
-                    Command::Notice => state.logger().log_notice(target, &client.info.nick, text),
-                    _ => state.logger().log_message(target, &client.info.nick, text),
-                }
-            }
-            None => {
-                if cmd == Command::Privmsg {
-                    client.send_numeric(ERR_NOSUCHCHANNEL, &[target, "No such channel"]);
+                // Relay to remote nodes.
+                if cmd == Command::Notice {
+                    state
+                        .relay_publish(RelayEvent::Notice {
+                            client_id,
+                            target: target.to_string(),
+                            text: text.to_string(),
+                        })
+                        .await;
+                } else {
+                    state
+                        .relay_publish(RelayEvent::Privmsg {
+                            client_id,
+                            target: target.to_string(),
+                            text: text.to_string(),
+                        })
+                        .await;
                 }
             }
         }
@@ -86,50 +92,60 @@ async fn route_message(state: &SharedState, client_id: ClientId, msg: &IrcMessag
             let target_lower = target.to_ascii_lowercase();
             if target_lower == "nickserv" {
                 match state.services() {
-                    Some(svc) => svc.dispatch_nickserv(&client.info.nick, text, &client).await,
-                    None => client
-                        .send_numeric(ERR_NOSUCHNICK, &[target, "NickServ is not available"]),
+                    Some(svc) => {
+                        svc.dispatch_nickserv(&client.info.nick, text, &client)
+                            .await
+                    }
+                    None => {
+                        client.send_numeric(ERR_NOSUCHNICK, &[target, "NickServ is not available"])
+                    }
                 }
                 return;
             }
             if target_lower == "chanserv" {
                 match state.services() {
-                    Some(svc) => svc.dispatch_chanserv(&client.info.nick, text, &client).await,
-                    None => client
-                        .send_numeric(ERR_NOSUCHNICK, &[target, "ChanServ is not available"]),
+                    Some(svc) => {
+                        svc.dispatch_chanserv(&client.info.nick, text, &client)
+                            .await
+                    }
+                    None => {
+                        client.send_numeric(ERR_NOSUCHNICK, &[target, "ChanServ is not available"])
+                    }
                 }
                 return;
             }
         }
 
-        // Check nick_kind to handle both local and remote routing.
-        match state.nick_kind(target).await {
-            Some(ClientKind::Local(_)) => {
-                if let Some(target_client) = state.find_client_by_nick(target).await {
-                    target_client.send_message(&outgoing);
+        // Look up target (local or remote) and route accordingly.
+        match state.find_user_by_nick(target).await {
+            Some(target_client) if target_client.is_local() => {
+                target_client.send_message(&outgoing);
 
-                    // RPL_AWAY to sender if target is away.
-                    if cmd == Command::Privmsg
-                        && let Some(away_msg) = state.get_away_message(target_client.id).await
-                    {
-                        client.send_numeric(RPL_AWAY, &[&target_client.info.nick, &away_msg]);
-                    }
-
-                    match cmd {
-                        Command::Notice => {
-                            state.logger().log_notice(target, &client.info.nick, text)
-                        }
-                        _ => state.logger().log_message(target, &client.info.nick, text),
-                    }
-                } else if cmd == Command::Privmsg {
-                    client.send_numeric(ERR_NOSUCHNICK, &[target, "No such nick/channel"]);
+                // RPL_AWAY to sender if target is away.
+                if cmd == Command::Privmsg
+                    && let Some(ref away_msg) = target_client.info.away
+                {
+                    client.send_numeric(RPL_AWAY, &[&target_client.info.nick, away_msg]);
                 }
             }
-            Some(ClientKind::Remote(_)) => {
-                state.relay_publish(&outgoing).await;
-                match cmd {
-                    Command::Notice => state.logger().log_notice(target, &client.info.nick, text),
-                    _ => state.logger().log_message(target, &client.info.nick, text),
+            Some(_remote_client) => {
+                // Target is on a remote node — relay to it.
+                if cmd == Command::Notice {
+                    state
+                        .relay_publish(RelayEvent::Notice {
+                            client_id,
+                            target: target.to_string(),
+                            text: text.to_string(),
+                        })
+                        .await;
+                } else {
+                    state
+                        .relay_publish(RelayEvent::Privmsg {
+                            client_id,
+                            target: target.to_string(),
+                            text: text.to_string(),
+                        })
+                        .await;
                 }
             }
             None => {

@@ -5,6 +5,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use crate::client::ClientHandle;
 
@@ -39,7 +40,7 @@ impl<'a> CommandContext<'a> {
 pub fn parse_command<'a>(
     sender: &'a str,
     text: &'a str,
-    service_name: &str,
+    service_name: Arc<str>,
     client_handle: &ClientHandle,
 ) -> CommandContext<'a> {
     let parts: Vec<&str> = text.splitn(3, ' ').collect();
@@ -61,7 +62,7 @@ pub fn parse_command<'a>(
         raw_args,
         reply: ReplyHandle {
             client: client_handle.clone(),
-            service_name: service_name.to_string(),
+            service_name,
         },
     }
 }
@@ -74,7 +75,7 @@ pub fn parse_command<'a>(
 #[derive(Clone)]
 pub struct ReplyHandle {
     client: ClientHandle,
-    service_name: String,
+    service_name: Arc<str>,
 }
 
 impl ReplyHandle {
@@ -116,15 +117,18 @@ pub trait ServiceModule: Send + Sync {
 /// claims it. Also aggregates HELP output from all active modules.
 pub struct ServiceDispatcher {
     /// The service name (e.g. "NickServ"), used in HELP header.
-    service_name: String,
+    service_name: Arc<str>,
     /// Active modules, in dispatch order.
     modules: Vec<Box<dyn ServiceModule>>,
 }
 
 impl ServiceDispatcher {
     /// Create a new dispatcher with the given service name and modules.
-    pub fn new(service_name: String, modules: Vec<Box<dyn ServiceModule>>) -> Self {
-        Self { service_name, modules }
+    pub fn new(service_name: impl Into<Arc<str>>, modules: Vec<Box<dyn ServiceModule>>) -> Self {
+        Self {
+            service_name: service_name.into(),
+            modules,
+        }
     }
 
     /// Dispatch a raw PRIVMSG to the appropriate module.
@@ -133,7 +137,7 @@ impl ServiceDispatcher {
     /// iterates modules. If no module handles it, sends an "unknown command"
     /// reply.
     pub async fn dispatch(&self, sender: &str, text: &str, client: &ClientHandle) {
-        let mut ctx = parse_command(sender, text, &self.service_name, client);
+        let mut ctx = parse_command(sender, text, Arc::clone(&self.service_name), client);
 
         // Uppercase the command for case-insensitive matching.
         let command_upper = ctx.command.to_ascii_uppercase();
@@ -157,7 +161,7 @@ impl ServiceDispatcher {
         // No module handled it.
         let reply = ReplyHandle {
             client: client.clone(),
-            service_name: self.service_name.clone(),
+            service_name: Arc::clone(&self.service_name),
         };
         reply.notice(
             sender,
@@ -169,7 +173,7 @@ impl ServiceDispatcher {
     async fn send_help(&self, sender: &str, client: &ClientHandle) {
         let reply = ReplyHandle {
             client: client.clone(),
-            service_name: self.service_name.clone(),
+            service_name: Arc::clone(&self.service_name),
         };
         reply.notice(sender, &format!("{} commands:", self.service_name));
         for module in &self.modules {

@@ -70,6 +70,11 @@ pub enum IrcEvent {
     MotdEnd,
     /// An unhandled/raw IRC message.
     Raw { line: String },
+    /// SASL authentication succeeded.  `account` is the canonical account name
+    /// confirmed by the server (from RPL_LOGGEDIN 900).
+    SaslLoggedIn { account: String },
+    /// SASL authentication failed (904 ERR_SASLFAIL or 906 ERR_SASLABORTED).
+    SaslFailed { code: u16, reason: String },
 }
 
 /// Create a new `ChannelMessage` with the current timestamp.

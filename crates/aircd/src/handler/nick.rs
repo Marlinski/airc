@@ -2,11 +2,12 @@
 
 use std::sync::Arc;
 
-use airc_shared::reply::*;
 use airc_shared::IrcMessage;
+use airc_shared::reply::*;
 use tracing::debug;
 
 use crate::client::ClientId;
+use crate::relay::RelayEvent;
 use crate::state::SharedState;
 
 pub async fn handle_nick(state: &SharedState, client_id: ClientId, msg: &IrcMessage) {
@@ -33,14 +34,13 @@ pub async fn handle_nick(state: &SharedState, client_id: ClientId, msg: &IrcMess
                 peer.send_line(&line);
             }
 
-            // Log nick change to all shared channels.
-            let channels = state.channels_for_client(client_id).await;
-            for ch in &channels {
-                state.logger().log_nick_change(ch, &old_prefix, new_nick);
-            }
-
             // Relay nick change to remote nodes.
-            state.relay_publish(&nick_msg).await;
+            state
+                .relay_publish(RelayEvent::NickChange {
+                    client_id,
+                    new_nick: new_nick.to_string(),
+                })
+                .await;
 
             debug!(client_id = %client_id, old = %old_prefix, new = %new_nick, "nick change");
         }

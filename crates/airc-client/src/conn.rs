@@ -1,24 +1,53 @@
-//! Low-level IRC connection: TCP/TLS reader/writer tasks.
+//! Low-level IRC connection: TCP/TLS transport tasks.
 //!
 //! Handles establishing a TCP (or TLS) connection, splitting it into a
-//! line reader and a line writer, automatic PONG responses, and
-//! dispatching parsed messages to the state tracker.
+//! line reader and a line writer, automatic PONG responses, and delegating
+//! all parsed messages to the `handler` module.
+//!
+//! # CAP / SASL negotiation
+//!
+//! The client always sends `CAP LS 302` before NICK/USER so that capability
+//! negotiation is possible.  The flow is:
+//!
+//! ```text
+//! C: CAP LS 302
+//! C: NICK <nick>
+//! C: USER <user> 0 * :<realname>
+//!
+//! S: CAP * LS :sasl multi-prefix ...   ← server capabilities
+//!
+//! If sasl is in the cap list and SaslConfig is set:
+//!   C: CAP REQ :sasl
+//!   S: CAP * ACK :sasl
+//!   C: AUTHENTICATE <MECHANISM>
+//!   S: AUTHENTICATE +               ← empty challenge (PLAIN)
+//!   C: AUTHENTICATE <base64-payload>
+//!   S: 900 ...                       ← RPL_LOGGEDIN
+//!   S: 903 ...                       ← RPL_SASLSUCCESS
+//! Else:
+//!   (no sasl negotiation)
+//!
+//! C: CAP END
+//! S: 001 ...                         ← RPL_WELCOME (registration complete)
+//! ```
+//!
+//! Protocol logic lives in `handler/`; this module is pure transport.
 
 use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc};
 use tokio_rustls::TlsConnector;
 use tracing::{debug, error, info, warn};
 
-use airc_shared::reply::*;
-use airc_shared::validate::is_channel_name;
-use airc_shared::{Command, IrcMessage, Prefix};
+use airc_shared::IrcMessage;
 
 use crate::config::{ClientConfig, TlsMode};
 use crate::error::ClientError;
-use crate::event::{IrcEvent, MessageKind, new_channel_message};
+use crate::event::IrcEvent;
+use crate::handler::cap::SaslHandshake;
+use crate::handler::{ConnContext, handle_message};
 use crate::state::ClientState;
 
 /// Sender for outgoing raw IRC lines (without \r\n).
@@ -26,6 +55,10 @@ pub type LineSender = mpsc::Sender<String>;
 
 /// Receiver for high-level IRC events.
 pub type EventReceiver = mpsc::Receiver<IrcEvent>;
+
+// ---------------------------------------------------------------------------
+// TLS helpers
+// ---------------------------------------------------------------------------
 
 /// Build a `rustls` TLS connector using system root certificates.
 fn tls_connector() -> TlsConnector {
@@ -47,6 +80,43 @@ fn extract_host(addr: &str) -> &str {
     addr.rsplit_once(':').map_or(addr, |(host, _)| host)
 }
 
+/// Establish a TLS connection over TCP.
+async fn establish_tls(
+    addr: &str,
+) -> Result<tokio_rustls::client::TlsStream<TcpStream>, ClientError> {
+    let tcp_stream = TcpStream::connect(addr).await?;
+    let host = extract_host(addr);
+    let server_name = rustls::pki_types::ServerName::try_from(host.to_string())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+
+    let connector = tls_connector();
+    let tls_stream = connector
+        .connect(server_name, tcp_stream)
+        .await
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::ConnectionRefused, e))?;
+
+    info!(addr = %addr, "TLS connection established");
+    Ok(tls_stream)
+}
+
+/// Derive the plain-text fallback address (replace port with 6667).
+fn fallback_plain_addr(addr: &str) -> String {
+    if let Some(bracket_end) = addr.find(']') {
+        if addr[bracket_end..].contains(':') {
+            return format!("{}:6667", &addr[..=bracket_end]);
+        }
+        return format!("{addr}:6667");
+    }
+    match addr.rsplit_once(':') {
+        Some((host, _port)) => format!("{host}:6667"),
+        None => format!("{addr}:6667"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public connect entry point
+// ---------------------------------------------------------------------------
+
 /// Establish a connection (TLS or plain TCP) and spawn reader/writer tasks.
 ///
 /// Returns:
@@ -66,6 +136,15 @@ pub async fn connect(
     // Channel for parsed events: reader task -> caller.
     let (event_tx, event_rx) = mpsc::channel::<IrcEvent>(512);
 
+    // Shared SASL handshake state — only populated when sasl is configured.
+    let sasl_state: Arc<Mutex<Option<SaslHandshake>>> =
+        Arc::new(Mutex::new(config.sasl.as_ref().map(|s| SaslHandshake {
+            account: s.account.clone(),
+            password: s.password.clone(),
+            mechanism: s.mechanism,
+            step: crate::handler::cap::SaslStep::AwaitingCapAck,
+        })));
+
     match config.tls {
         TlsMode::Required => {
             let tls_stream = establish_tls(&config.server_addr).await?;
@@ -77,43 +156,39 @@ pub async fn connect(
                 line_rx,
                 event_tx,
                 state.clone(),
+                sasl_state,
             );
         }
-        TlsMode::Preferred => {
-            // Try TLS first; fall back to plain TCP on failure.
-            match establish_tls(&config.server_addr).await {
-                Ok(tls_stream) => {
-                    let (reader, writer) = tokio::io::split(tls_stream);
-                    spawn_io_tasks(
-                        reader,
-                        writer,
-                        line_tx.clone(),
-                        line_rx,
-                        event_tx,
-                        state.clone(),
-                    );
-                }
-                Err(tls_err) => {
-                    info!(
-                        error = %tls_err,
-                        "TLS connection failed, falling back to plain TCP"
-                    );
-                    // Derive the plain-text address: replace port with 6667.
-                    let plain_addr = fallback_plain_addr(&config.server_addr);
-                    let tcp_stream = TcpStream::connect(&plain_addr).await?;
-                    info!(addr = %plain_addr, "plain TCP connection established (fallback)");
-                    let (reader, writer) = tokio::io::split(tcp_stream);
-                    spawn_io_tasks(
-                        reader,
-                        writer,
-                        line_tx.clone(),
-                        line_rx,
-                        event_tx,
-                        state.clone(),
-                    );
-                }
+        TlsMode::Preferred => match establish_tls(&config.server_addr).await {
+            Ok(tls_stream) => {
+                let (reader, writer) = tokio::io::split(tls_stream);
+                spawn_io_tasks(
+                    reader,
+                    writer,
+                    line_tx.clone(),
+                    line_rx,
+                    event_tx,
+                    state.clone(),
+                    sasl_state,
+                );
             }
-        }
+            Err(tls_err) => {
+                info!(error = %tls_err, "TLS connection failed, falling back to plain TCP");
+                let plain_addr = fallback_plain_addr(&config.server_addr);
+                let tcp_stream = TcpStream::connect(&plain_addr).await?;
+                info!(addr = %plain_addr, "plain TCP connection established (fallback)");
+                let (reader, writer) = tokio::io::split(tcp_stream);
+                spawn_io_tasks(
+                    reader,
+                    writer,
+                    line_tx.clone(),
+                    line_rx,
+                    event_tx,
+                    state.clone(),
+                    sasl_state,
+                );
+            }
+        },
         TlsMode::Disabled => {
             let tcp_stream = TcpStream::connect(&config.server_addr).await?;
             info!(addr = %config.server_addr, "plain TCP connection established");
@@ -125,11 +200,18 @@ pub async fn connect(
                 line_rx,
                 event_tx,
                 state.clone(),
+                sasl_state,
             );
         }
     }
 
     // Send registration sequence.
+    //
+    // Always start with CAP LS 302 so the server knows we speak IRCv3.
+    // NICK and USER follow immediately — the server buffers them until
+    // CAP END completes registration.
+    let _ = line_tx.send("CAP LS 302".to_string()).await;
+
     if let Some(ref pass) = config.password {
         let _ = line_tx.send(IrcMessage::pass(pass).serialize()).await;
     }
@@ -143,46 +225,10 @@ pub async fn connect(
     Ok((line_tx, event_rx, state))
 }
 
-/// Establish a TLS connection over TCP. Returns the TLS stream.
-async fn establish_tls(
-    addr: &str,
-) -> Result<tokio_rustls::client::TlsStream<TcpStream>, ClientError> {
-    let tcp_stream = TcpStream::connect(addr).await?;
-    let host = extract_host(addr);
-    let server_name = rustls::pki_types::ServerName::try_from(host.to_string())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+// ---------------------------------------------------------------------------
+// I/O task spawning
+// ---------------------------------------------------------------------------
 
-    let connector = tls_connector();
-    let tls_stream = connector
-        .connect(server_name, tcp_stream)
-        .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::ConnectionRefused, e))?;
-
-    info!(addr = %addr, "TLS connection established");
-    Ok(tls_stream)
-}
-
-/// Derive the plain-text fallback address from a TLS address.
-///
-/// Replaces the port with 6667 (standard IRC plain-text port).
-/// If the address has no port, appends `:6667`.
-fn fallback_plain_addr(addr: &str) -> String {
-    // Handle [IPv6]:port
-    if let Some(bracket_end) = addr.find(']') {
-        if addr[bracket_end..].contains(':') {
-            // [::1]:6697 -> [::1]:6667
-            return format!("{}:6667", &addr[..=bracket_end]);
-        }
-        return format!("{addr}:6667");
-    }
-    // host:port
-    match addr.rsplit_once(':') {
-        Some((host, _port)) => format!("{host}:6667"),
-        None => format!("{addr}:6667"),
-    }
-}
-
-/// Spawn the reader and writer background tasks for any `AsyncRead + AsyncWrite` stream.
 fn spawn_io_tasks<R, W>(
     reader: R,
     writer: W,
@@ -190,12 +236,13 @@ fn spawn_io_tasks<R, W>(
     line_rx: mpsc::Receiver<String>,
     event_tx: mpsc::Sender<IrcEvent>,
     state: ClientState,
+    sasl_state: Arc<Mutex<Option<SaslHandshake>>>,
 ) where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
     tokio::spawn(write_loop(writer, line_rx));
-    tokio::spawn(read_loop(reader, line_tx, event_tx, state));
+    tokio::spawn(read_loop(reader, line_tx, event_tx, state, sasl_state));
 }
 
 /// Writer task: drains the line channel and writes to the stream.
@@ -211,24 +258,32 @@ async fn write_loop<W: AsyncWrite + Unpin>(mut writer: W, mut rx: mpsc::Receiver
     debug!("writer task exiting");
 }
 
-/// Reader task: reads lines from the stream, parses them, updates state,
-/// and emits events.
+/// Reader task: reads lines from the stream, parses them, and delegates to
+/// `handler::handle_message`.
 async fn read_loop<R: AsyncRead + Unpin>(
     reader: R,
     line_tx: LineSender,
     event_tx: mpsc::Sender<IrcEvent>,
     state: ClientState,
+    sasl_state: Arc<Mutex<Option<SaslHandshake>>>,
 ) {
     let mut buf_reader = BufReader::new(reader);
     let mut line_buf = String::new();
+
+    let ctx = ConnContext {
+        line_tx,
+        event_tx: event_tx.clone(),
+        state,
+        sasl_state,
+    };
 
     loop {
         line_buf.clear();
         match buf_reader.read_line(&mut line_buf).await {
             Ok(0) => {
-                // Connection closed.
                 info!("connection closed by server");
-                let _ = event_tx
+                let _ = ctx
+                    .event_tx
                     .send(IrcEvent::Disconnected {
                         reason: "connection closed by server".to_string(),
                     })
@@ -243,7 +298,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 debug!(line = %trimmed, "<- received");
                 match IrcMessage::parse(trimmed) {
                     Ok(msg) => {
-                        handle_message(msg, &line_tx, &event_tx, &state).await;
+                        handle_message(msg, &ctx).await;
                     }
                     Err(e) => {
                         warn!(error = %e, line = %trimmed, "failed to parse IRC message");
@@ -252,7 +307,8 @@ async fn read_loop<R: AsyncRead + Unpin>(
             }
             Err(e) => {
                 error!(error = %e, "read error");
-                let _ = event_tx
+                let _ = ctx
+                    .event_tx
                     .send(IrcEvent::Disconnected {
                         reason: format!("read error: {e}"),
                     })
@@ -262,270 +318,4 @@ async fn read_loop<R: AsyncRead + Unpin>(
         }
     }
     debug!("reader task exiting");
-}
-
-/// Process a single parsed IRC message: update state, auto-respond, emit events.
-async fn handle_message(
-    msg: IrcMessage,
-    line_tx: &LineSender,
-    event_tx: &mpsc::Sender<IrcEvent>,
-    state: &ClientState,
-) {
-    match &msg.command {
-        // -- Auto PONG --------------------------------------------------------
-        Command::Ping => {
-            let token = msg.params.first().map(|s| s.as_str()).unwrap_or("");
-            let _ = line_tx.send(IrcMessage::pong(token).serialize()).await;
-        }
-
-        // -- Registration complete --------------------------------------------
-        Command::Numeric(n) if *n == RPL_WELCOME => {
-            let nick = msg.params.first().cloned().unwrap_or_default();
-            let server = msg.prefix.clone().unwrap_or_default();
-            let message = msg.params.last().cloned().unwrap_or_default();
-            state.set_nick(nick.clone()).await;
-            state.set_server_name(server.clone()).await;
-            state.set_registered().await;
-            let _ = event_tx
-                .send(IrcEvent::Registered {
-                    nick,
-                    server,
-                    message,
-                })
-                .await;
-        }
-
-        // -- Nick in use ------------------------------------------------------
-        Command::Numeric(n) if *n == ERR_NICKNAMEINUSE => {
-            // Try appending underscore.
-            let current = state.nick().await;
-            let new_nick = format!("{current}_");
-            state.set_nick(new_nick.clone()).await;
-            let _ = line_tx.send(IrcMessage::nick(&new_nick).serialize()).await;
-            warn!(nick = %new_nick, "nick in use, trying alternative");
-        }
-
-        // -- Topic (332) -----------------------------------------------------
-        Command::Numeric(n) if *n == RPL_TOPIC => {
-            if msg.params.len() >= 3 {
-                let channel = &msg.params[1];
-                let topic = &msg.params[2];
-                state.set_topic(channel, topic.clone()).await;
-            }
-        }
-
-        // -- NAMES reply (353) ------------------------------------------------
-        Command::Numeric(n) if *n == RPL_NAMREPLY => {
-            // params: nick = #channel :nick1 @nick2 +nick3
-            if msg.params.len() >= 4 {
-                let channel = &msg.params[2];
-                let names_str = &msg.params[3];
-                let members: Vec<String> = names_str
-                    .split_whitespace()
-                    .map(|n| {
-                        // Strip mode prefixes (@, +, %)
-                        n.trim_start_matches(|c| c == '@' || c == '+' || c == '%')
-                            .to_string()
-                    })
-                    .collect();
-                state.set_members(channel, members).await;
-            }
-        }
-
-        // -- JOIN -------------------------------------------------------------
-        Command::Join => {
-            let channel = msg.params.first().cloned().unwrap_or_default();
-            let nick = extract_nick(&msg.prefix);
-            let our_nick = state.nick().await;
-
-            if nick.eq_ignore_ascii_case(&our_nick) {
-                // We joined.
-                state.join_channel(&channel).await;
-            } else {
-                // Someone else joined.
-                state.add_member(&channel, &nick).await;
-            }
-            let _ = event_tx.send(IrcEvent::Join { nick, channel }).await;
-        }
-
-        // -- PART -------------------------------------------------------------
-        Command::Part => {
-            let channel = msg.params.first().cloned().unwrap_or_default();
-            let reason = msg.params.get(1).cloned();
-            let nick = extract_nick(&msg.prefix);
-            let our_nick = state.nick().await;
-
-            if nick.eq_ignore_ascii_case(&our_nick) {
-                state.part_channel(&channel).await;
-            } else {
-                state.remove_member(&channel, &nick).await;
-            }
-            let _ = event_tx
-                .send(IrcEvent::Part {
-                    nick,
-                    channel,
-                    reason,
-                })
-                .await;
-        }
-
-        // -- QUIT -------------------------------------------------------------
-        Command::Quit => {
-            let nick = extract_nick(&msg.prefix);
-            let reason = msg.params.first().cloned();
-            state.remove_member_all(&nick).await;
-            let _ = event_tx.send(IrcEvent::Quit { nick, reason }).await;
-        }
-
-        // -- KICK -------------------------------------------------------------
-        Command::Kick => {
-            if msg.params.len() >= 2 {
-                let channel = msg.params[0].clone();
-                let kicked = msg.params[1].clone();
-                let reason = msg.params.get(2).cloned();
-                let by = extract_nick(&msg.prefix);
-                let our_nick = state.nick().await;
-
-                if kicked.eq_ignore_ascii_case(&our_nick) {
-                    state.part_channel(&channel).await;
-                } else {
-                    state.remove_member(&channel, &kicked).await;
-                }
-                let _ = event_tx
-                    .send(IrcEvent::Kick {
-                        channel,
-                        nick: kicked,
-                        by,
-                        reason,
-                    })
-                    .await;
-            }
-        }
-
-        // -- NICK change ------------------------------------------------------
-        Command::Nick => {
-            let old_nick = extract_nick(&msg.prefix);
-            let new_nick = msg.params.first().cloned().unwrap_or_default();
-            let our_nick = state.nick().await;
-
-            if old_nick.eq_ignore_ascii_case(&our_nick) {
-                state.set_nick(new_nick.clone()).await;
-            }
-            state.rename_member(&old_nick, &new_nick).await;
-            let _ = event_tx
-                .send(IrcEvent::NickChange { old_nick, new_nick })
-                .await;
-        }
-
-        // -- TOPIC change -----------------------------------------------------
-        Command::Topic => {
-            let channel = msg.params.first().cloned().unwrap_or_default();
-            let topic = msg.params.get(1).cloned().unwrap_or_default();
-            let set_by = extract_nick(&msg.prefix);
-            state.set_topic(&channel, topic.clone()).await;
-            let _ = event_tx
-                .send(IrcEvent::TopicChange {
-                    channel,
-                    topic,
-                    set_by,
-                })
-                .await;
-        }
-
-        // -- PRIVMSG ----------------------------------------------------------
-        Command::Privmsg => {
-            if msg.params.len() >= 2 {
-                let target = &msg.params[0];
-                let text = &msg.params[1];
-                let from = extract_nick(&msg.prefix);
-
-                // Detect CTCP ACTION.
-                let (text, kind) = if text.starts_with("\x01ACTION ") && text.ends_with('\x01') {
-                    let inner = &text[8..text.len() - 1];
-                    (inner.to_string(), MessageKind::Action)
-                } else {
-                    (text.clone(), MessageKind::Normal)
-                };
-
-                let cm = new_channel_message(target.clone(), from.clone(), text.clone(), kind);
-
-                if is_channel_name(target) {
-                    state.push_message(target, cm).await;
-                } else {
-                    // Private message — buffer under the sender's nick.
-                    state.push_private_message(cm).await;
-                }
-
-                let _ = event_tx
-                    .send(IrcEvent::Message(new_channel_message(
-                        target.clone(),
-                        from,
-                        text,
-                        MessageKind::Normal,
-                    )))
-                    .await;
-            }
-        }
-
-        // -- NOTICE -----------------------------------------------------------
-        Command::Notice => {
-            let target = msg.params.first().cloned().unwrap_or_default();
-            let text = msg.params.get(1).cloned().unwrap_or_default();
-            let from = msg.prefix.as_ref().map(|p| extract_nick(&Some(p.clone())));
-
-            // Buffer notices from service bots as messages too.
-            if let Some(ref from_nick) = from {
-                let cm = new_channel_message(
-                    target.clone(),
-                    from_nick.clone(),
-                    text.clone(),
-                    MessageKind::Normal,
-                );
-                if is_channel_name(&target) {
-                    state.push_message(&target, cm).await;
-                } else {
-                    state.push_private_message(cm).await;
-                }
-            }
-
-            let _ = event_tx.send(IrcEvent::Notice { from, target, text }).await;
-        }
-
-        // -- MOTD (375, 372, 376) --------------------------------------------
-        Command::Numeric(n) if *n == RPL_MOTDSTART => {
-            // 375 — start of MOTD. Nothing to emit; the body lines follow.
-        }
-        Command::Numeric(n) if *n == RPL_MOTD => {
-            // 372 — a single MOTD body line.
-            // params: <nick> :<motd line>
-            let line = msg.params.last().cloned().unwrap_or_default();
-            // Strip the conventional "- " prefix that IRC servers prepend.
-            let line = line.strip_prefix("- ").unwrap_or(&line).to_string();
-            let _ = event_tx.send(IrcEvent::Motd { line }).await;
-        }
-        Command::Numeric(n) if *n == RPL_ENDOFMOTD => {
-            // 376 — end of MOTD.
-            let _ = event_tx.send(IrcEvent::MotdEnd).await;
-        }
-
-        // -- Everything else: emit as Raw ------------------------------------
-        _ => {
-            let _ = event_tx
-                .send(IrcEvent::Raw {
-                    line: msg.serialize(),
-                })
-                .await;
-        }
-    }
-}
-
-/// Extract the nick from an optional prefix string.
-fn extract_nick(prefix: &Option<String>) -> String {
-    match prefix {
-        Some(p) => {
-            let parsed = Prefix::parse(p);
-            parsed.nick().to_string()
-        }
-        None => String::new(),
-    }
 }

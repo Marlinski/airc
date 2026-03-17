@@ -38,11 +38,13 @@ message ChannelStatus {
 // Log events — append-only CSV files, one per channel/PM.
 //
 // CSV column order matches field numbers:
-//   timestamp,event_type,channel,nick,content
+//   seq,node_id,timestamp,event_type,channel,nick,content
 //
+// - seq: monotonic u64 counter scoped to the logger instance
+// - node_id: originating node identity string
 // - timestamp: RFC 3339 (e.g. 2026-03-13T14:05:00Z)
 // - event_type: one of the EventType enum values (lowercase in CSV)
-// - channel: channel name or nick for DMs
+// - channel: channel name or nick for DMs (empty for server-wide events)
 // - nick: the user who triggered the event
 // - content: message text, reason, new topic, etc. (may be empty)
 // ---------------------------------------------------------------------------
@@ -60,9 +62,11 @@ enum EventType {
 
 // One row in a channel log file.
 message LogEvent {
-  string    timestamp  = 1;   // RFC 3339
-  EventType event_type = 2;
-  string    channel    = 3;   // channel name or DM peer nick
-  string    nick       = 4;   // who triggered the event
-  string    content    = 5;   // message body / reason / new topic
+  uint64    seq        = 1;   // monotonic counter scoped to this logger instance
+  string    node_id    = 2;   // originating node identity
+  string    timestamp  = 3;   // RFC 3339
+  EventType event_type = 4;
+  string    channel    = 5;   // channel name or DM peer nick (empty for server-wide events)
+  string    nick       = 6;   // who triggered the event
+  string    content    = 7;   // message body / reason / new topic
 }

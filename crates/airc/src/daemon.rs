@@ -503,7 +503,7 @@ async fn execute_request(
                 return ipc::response_err(&format!("cannot create log directory: {e}"));
             }
 
-            let fl = FileLogger::new(Some(dir.clone()));
+            let fl = FileLogger::new(Some(dir.clone()), "client");
             if !fl.is_active() {
                 return ipc::response_err("failed to initialize logger");
             }

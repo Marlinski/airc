@@ -1,33 +1,42 @@
 //! No-op relay — used in single-instance mode.
 //!
-//! Every method is a no-op that returns `Ok(())` immediately.  The
-//! `subscribe()` channel never yields events.  This ensures **zero
-//! overhead** when running a single aircd instance.
+//! In single-instance mode there are no remote nodes to relay to, so every
+//! network method is a no-op.  The [`FileLogger`] is still owned here and
+//! receives structured logging calls so the single-node CSV event log is
+//! preserved.
+
+use std::path::PathBuf;
 
 use rand::Rng;
 use tokio::sync::mpsc;
 
 use crate::client::NodeId;
-use crate::relay::{BoxFuture, InboundEvent, Relay, RelayError};
-
-use airc_shared::IrcMessage;
+use crate::relay::{BoxFuture, Relay, RelayError, RelayEvent};
+use airc_shared::log::FileLogger;
 
 /// A relay that does nothing — for single-instance deployments.
-#[allow(dead_code)] // node_id is accessed via the Relay trait.
+///
+/// Owns a [`FileLogger`] that records every IRC event passing through the
+/// typed publish methods.
 pub struct NoopRelay {
     node_id: NodeId,
+    #[allow(dead_code)]
+    logger: FileLogger,
 }
 
 impl NoopRelay {
     /// Create a new no-op relay with a random node ID.
-    pub fn new() -> Self {
+    ///
+    /// Pass `Some(dir)` for `log_dir` to enable CSV event logging under that
+    /// directory.  Pass `None` to disable logging (all writes become no-ops).
+    pub fn new(log_dir: Option<PathBuf>) -> Self {
         let mut rng = rand::thread_rng();
         let id: String = (0..16)
             .map(|_| format!("{:02x}", rng.r#gen::<u8>()))
             .collect();
-        Self {
-            node_id: NodeId(id),
-        }
+        let node_id = NodeId(id);
+        let logger = FileLogger::new(log_dir, node_id.0.clone());
+        Self { node_id, logger }
     }
 }
 
@@ -36,12 +45,12 @@ impl Relay for NoopRelay {
         &self.node_id
     }
 
-    fn publish(&self, _message: &IrcMessage) -> BoxFuture<'_, Result<(), RelayError>> {
-        // Single instance — nothing to relay.
+    fn publish(&self, _event: RelayEvent) -> BoxFuture<'_, Result<(), RelayError>> {
+        // Single instance — no remote nodes to notify.
         Box::pin(async { Ok(()) })
     }
 
-    fn subscribe(&self) -> BoxFuture<'_, Result<mpsc::Receiver<InboundEvent>, RelayError>> {
+    fn subscribe(&self) -> BoxFuture<'_, Result<mpsc::Receiver<RelayEvent>, RelayError>> {
         Box::pin(async {
             // Return a channel that never yields — the sender is dropped immediately.
             let (_tx, rx) = mpsc::channel(1);

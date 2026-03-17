@@ -30,7 +30,10 @@ use crate::module::ServiceDispatcher;
 
 /// AIRC Services — external service bot framework for aircd.
 #[derive(Parser, Debug)]
-#[command(name = "airc-services", about = "External IRC service bot framework for aircd")]
+#[command(
+    name = "airc-services",
+    about = "External IRC service bot framework for aircd"
+)]
 struct Cli {
     /// Path to the TOML configuration file.
     #[arg(short, long)]

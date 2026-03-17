@@ -8,6 +8,7 @@ use airc_shared::{Command, IrcMessage};
 use tracing::debug;
 
 use crate::client::ClientId;
+use crate::relay::RelayEvent;
 use crate::state::SharedState;
 
 use super::{is_channel_name, send_names_to_client, send_topic_to_client};
@@ -36,8 +37,13 @@ pub async fn handle_join(state: &SharedState, client_id: ClientId, msg: &IrcMess
             for member in &remaining {
                 member.send_line(&line);
             }
-            state.relay_publish(&part_msg).await;
-            state.logger().log_part(&channel_name, &client.info.nick, "");
+            state
+                .relay_publish(RelayEvent::Part {
+                    client_id,
+                    channel: channel_name.to_string(),
+                    reason: None,
+                })
+                .await;
         }
         return;
     }
@@ -58,25 +64,27 @@ pub async fn handle_join(state: &SharedState, client_id: ClientId, msg: &IrcMess
             continue;
         }
 
-        // Check channel key (+k).
-        if let Some(channel) = state.get_channel(channel_name).await
-            && let Some(ref chan_key) = channel.modes.key
-        {
-            match provided_key {
-                Some(k) if k == chan_key => {}
-                _ => {
-                    client.send_numeric(
-                        ERR_BADCHANNELKEY,
-                        &[channel_name, "Cannot join channel (+k)"],
-                    );
-                    continue;
+        // Check channel key (+k), invite-only (+i), and member limit (+l) in a
+        // single get_channel call to avoid acquiring the channels lock three
+        // separate times.  Use `get_channel_view` to avoid cloning the members
+        // HashMap (potentially 50k entries).
+        if let Some(channel) = state.get_channel_view(channel_name).await {
+            // Key check (+k).
+            if let Some(ref chan_key) = channel.modes.key {
+                match provided_key {
+                    Some(k) if k == chan_key => {}
+                    _ => {
+                        client.send_numeric(
+                            ERR_BADCHANNELKEY,
+                            &[channel_name, "Cannot join channel (+k)"],
+                        );
+                        continue;
+                    }
                 }
             }
-        }
 
-        // Check invite-only (+i).
-        if let Some(channel) = state.get_channel(channel_name).await {
-            if channel.modes.invite_only && !channel.is_invited(&client.info.nick) {
+            // Invite-only check (+i).
+            if channel.modes.invite_only && !channel.is_invited(client_id) {
                 client.send_numeric(
                     ERR_INVITEONLYCHAN,
                     &[channel_name, "Cannot join channel (+i)"],
@@ -84,9 +92,9 @@ pub async fn handle_join(state: &SharedState, client_id: ClientId, msg: &IrcMess
                 continue;
             }
 
-            // Check member limit (+l).
+            // Member limit check (+l).
             if let Some(limit) = channel.modes.limit
-                && channel.member_count() >= limit
+                && channel.member_count >= limit
             {
                 client.send_numeric(
                     ERR_CHANNELISFULL,
@@ -100,6 +108,21 @@ pub async fn handle_join(state: &SharedState, client_id: ClientId, msg: &IrcMess
         if let Some(svc) = state.services() {
             if let Err(reason) = svc.check_join(channel_name, &client.info.nick).await {
                 client.send_numeric(ERR_BANNEDFROMCHAN, &[channel_name, &reason]);
+                continue;
+            }
+        }
+
+        // CRDT ban list check via PersistentState.
+        if let Some(ps) = state.persistent() {
+            let userhost = format!("{}@{}", client.info.username, client.info.hostname);
+            if ps
+                .is_banned(channel_name, &client.info.nick, Some(&userhost))
+                .await
+            {
+                client.send_numeric(
+                    ERR_BANNEDFROMCHAN,
+                    &[channel_name, "Cannot join channel (+b)"],
+                );
                 continue;
             }
         }
@@ -122,8 +145,12 @@ pub async fn handle_join(state: &SharedState, client_id: ClientId, msg: &IrcMess
         send_topic_to_client(&client, &channel.name, &channel.topic);
         send_names_to_client(state, &client, &channel.name).await;
 
-        state.relay_publish(&join_msg).await;
-        state.logger().log_join(&channel.name, &client.info.nick);
+        state
+            .relay_publish(RelayEvent::Join {
+                client_id,
+                channel: channel.name.clone(),
+            })
+            .await;
         debug!(client_id = %client_id, channel = %channel.name, "joined channel");
     }
 }
@@ -155,10 +182,13 @@ pub async fn handle_part(state: &SharedState, client_id: ClientId, msg: &IrcMess
                 for member in &remaining {
                     member.send_line(&line);
                 }
-                state.relay_publish(&part_msg).await;
                 state
-                    .logger()
-                    .log_part(channel_name, &client.info.nick, reason.unwrap_or(""));
+                    .relay_publish(RelayEvent::Part {
+                        client_id,
+                        channel: channel_name.to_string(),
+                        reason: reason.map(str::to_string),
+                    })
+                    .await;
                 debug!(client_id = %client_id, channel = %channel_name, "parted channel");
             }
             None => {
@@ -187,7 +217,7 @@ pub async fn handle_topic(state: &SharedState, client_id: ClientId, msg: &IrcMes
 
     // Query topic.
     if msg.params.len() < 2 {
-        match state.get_channel(channel_name).await {
+        match state.get_channel_view(channel_name).await {
             Some(channel) => send_topic_to_client(&client, channel_name, &channel.topic),
             None => {
                 client.send_numeric(ERR_NOSUCHCHANNEL, &[channel_name, "No such channel"]);
@@ -197,19 +227,20 @@ pub async fn handle_topic(state: &SharedState, client_id: ClientId, msg: &IrcMes
     }
 
     // Set topic — check membership and permissions.
-    match state.get_channel(channel_name).await {
+    match state.get_channel_view(channel_name).await {
         None => {
             client.send_numeric(ERR_NOSUCHCHANNEL, &[channel_name, "No such channel"]);
         }
         Some(ch) => {
-            if !ch.is_member_id(client_id) {
+            if !state.is_channel_member_id(channel_name, client_id).await {
                 client.send_numeric(
                     ERR_NOTONCHANNEL,
                     &[channel_name, "You're not on that channel"],
                 );
                 return;
             }
-            if ch.modes.topic_locked && !ch.is_operator_id(client_id) {
+            if ch.modes.topic_locked && !state.is_channel_operator_id(channel_name, client_id).await
+            {
                 client.send_numeric(
                     ERR_CHANOPRIVSNEEDED,
                     &[channel_name, "You're not channel operator"],
@@ -241,10 +272,13 @@ pub async fn handle_topic(state: &SharedState, client_id: ClientId, msg: &IrcMes
                 for member in &members {
                     member.send_line(&line);
                 }
-                state.relay_publish(&topic_msg).await;
                 state
-                    .logger()
-                    .log_topic(channel_name, &client.info.nick, &new_topic);
+                    .relay_publish(RelayEvent::Topic {
+                        client_id,
+                        channel: channel_name.to_string(),
+                        text: new_topic.clone(),
+                    })
+                    .await;
             }
         }
     }
@@ -315,7 +349,9 @@ pub async fn handle_kick(state: &SharedState, client_id: ClientId, msg: &IrcMess
         return;
     };
 
-    if !state.is_channel_member(channel_name, target_nick).await {
+    // Check membership using ClientId directly — avoids a second nick resolution.
+    // Use is_channel_member_id to avoid cloning the members HashMap.
+    if !state.is_channel_member_id(channel_name, target.id).await {
         client.send_numeric(
             ERR_USERNOTINCHANNEL,
             &[target_nick, channel_name, "They aren't on that channel"],
@@ -341,13 +377,15 @@ pub async fn handle_kick(state: &SharedState, client_id: ClientId, msg: &IrcMess
         }
     }
 
-    state.relay_publish(&kick_msg).await;
+    state
+        .relay_publish(RelayEvent::Kick {
+            client_id,
+            channel: channel_name.to_string(),
+            target_client_id: target.id,
+            reason: reason.to_string(),
+        })
+        .await;
     state.kick_from_channel(channel_name, target_nick).await;
-    state.logger().log_kick(
-        channel_name,
-        &target.info.nick,
-        &format!("by {} ({})", client.info.nick, reason),
-    );
     debug!(client_id = %client_id, target = %target_nick, channel = %channel_name, "kicked");
 }
 
@@ -374,8 +412,10 @@ pub async fn handle_invite(state: &SharedState, client_id: ClientId, msg: &IrcMe
     };
 
     // If channel exists, validate membership and permissions.
-    if let Some(channel) = state.get_channel(channel_name).await {
-        if !channel.is_member_id(client_id) {
+    // Use get_channel_view to avoid cloning the members HashMap; per-member
+    // queries use targeted is_channel_member_id / is_channel_operator_id.
+    if let Some(channel) = state.get_channel_view(channel_name).await {
+        if !state.is_channel_member_id(channel_name, client_id).await {
             client.send_numeric(
                 ERR_NOTONCHANNEL,
                 &[channel_name, "You're not on that channel"],
@@ -383,7 +423,7 @@ pub async fn handle_invite(state: &SharedState, client_id: ClientId, msg: &IrcMe
             return;
         }
 
-        if channel.is_member_nick(target_nick) {
+        if state.is_channel_member_id(channel_name, target.id).await {
             client.send_numeric(
                 ERR_USERONCHANNEL,
                 &[target_nick, channel_name, "is already on channel"],
@@ -391,7 +431,8 @@ pub async fn handle_invite(state: &SharedState, client_id: ClientId, msg: &IrcMe
             return;
         }
 
-        if channel.modes.invite_only && !channel.is_operator_id(client_id) {
+        if channel.modes.invite_only && !state.is_channel_operator_id(channel_name, client_id).await
+        {
             client.send_numeric(
                 ERR_CHANOPRIVSNEEDED,
                 &[channel_name, "You're not channel operator"],
@@ -411,8 +452,8 @@ pub async fn handle_invite(state: &SharedState, client_id: ClientId, msg: &IrcMe
     };
     target.send_message(&invite_msg);
 
-    if let Some(away_msg) = state.get_away_message(target.id).await {
-        client.send_numeric(RPL_AWAY, &[&target.info.nick, &away_msg]);
+    if let Some(ref away_msg) = target.info.away {
+        client.send_numeric(RPL_AWAY, &[&target.info.nick, away_msg]);
     }
 
     debug!(

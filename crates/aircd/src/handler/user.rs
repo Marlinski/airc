@@ -7,6 +7,7 @@ use airc_shared::{Command, IrcMessage};
 use tracing::debug;
 
 use crate::client::ClientId;
+use crate::relay::RelayEvent;
 use crate::state::SharedState;
 
 use super::is_channel_name;
@@ -19,14 +20,6 @@ pub async fn handle_quit(state: &SharedState, client_id: ClientId, msg: &IrcMess
     let reason = msg.params.first().map(|s| s.as_str()).unwrap_or("Quit");
     let client = state.get_client(client_id).await;
 
-    // Log quit to all channels the user is in (before removing them).
-    if let Some(ref client) = client {
-        let channels = state.channels_for_client(client_id).await;
-        for ch in &channels {
-            state.logger().log_quit(ch, &client.info.nick, reason);
-        }
-    }
-
     // Notify all peers in shared channels.
     let peers = state.peers_in_shared_channels(client_id).await;
     if let Some(ref client) = client {
@@ -37,7 +30,12 @@ pub async fn handle_quit(state: &SharedState, client_id: ClientId, msg: &IrcMess
         }
 
         // Relay QUIT to remote nodes (they derive nick removal from this).
-        state.relay_publish(&quit_msg).await;
+        state
+            .relay_publish(RelayEvent::Quit {
+                client_id,
+                reason: Some(reason.to_string()),
+            })
+            .await;
     }
 
     // Send ERROR to the quitting client.
@@ -83,24 +81,16 @@ pub async fn handle_who(state: &SharedState, client_id: ClientId, msg: &IrcMessa
 
     if is_channel_name(mask) {
         // Channel WHO — list all visible members.
-        // +i members are visible because the querier is (presumably) also on
-        // the channel.  Membership check is not strictly required here per
-        // RFC 2812 but non-members of a +s channel will see nothing via LIST
-        // anyway.
-        if let Some(channel) = state.get_channel(mask).await {
-            let members = state.channel_members(mask).await.unwrap_or_default();
-            for member in &members {
+        // Use channel_members_with_mode to get member handles and their mode
+        // flags in one pass, avoiding a full Channel::clone().
+        if let Some(members_with_mode) = state.channel_members_with_mode(mask).await {
+            for (member, mode) in &members_with_mode {
                 // H = here, G = gone (away).
-                let away_flag = if state.get_away_message(member.id).await.is_some() {
-                    "G"
-                } else {
-                    "H"
-                };
+                let away_flag = if member.info.away.is_some() { "G" } else { "H" };
                 // Membership prefix: @ for op, + for voiced.
-                let nick_lower = member.info.nick.to_ascii_lowercase();
-                let prefix = if channel.operators.contains(&nick_lower) {
+                let prefix = if mode.is_op() {
                     "@"
-                } else if channel.voiced.contains(&nick_lower) {
+                } else if mode.is_voice() {
                     "+"
                 } else {
                     ""
@@ -125,27 +115,14 @@ pub async fn handle_who(state: &SharedState, client_id: ClientId, msg: &IrcMessa
         // Non-channel WHO (mask = "*" or a nick/host pattern).
         // +i users are hidden from non-channel WHO unless the querier shares
         // a channel with them.
-        let all_clients = state.all_clients().await;
-        for target in &all_clients {
-            // Skip self — some clients expect self to appear, but RFC 2812
-            // does not require it; we include self unconditionally.
-            let skip_invisible = target.id != client_id
-                && target.info.is_invisible()
-                && !state.shares_channel(client_id, target.id).await;
-            if skip_invisible {
-                continue;
-            }
-
-            // Simple glob: "*" matches everyone; otherwise match nick.
-            if mask != "*" && !target.info.nick.eq_ignore_ascii_case(mask) {
-                continue;
-            }
-
-            let away_flag = if state.get_away_message(target.id).await.is_some() {
-                "G"
-            } else {
-                "H"
-            };
+        //
+        // `who_matching_clients` builds the co-member set and applies the
+        // visibility + mask filter in a single two-pass iteration, avoiding
+        // the O(N) full-clone that `all_clients()` + `co_members()` would
+        // require.
+        let matching = state.who_matching_clients(client_id, mask).await;
+        for target in &matching {
+            let away_flag = if target.info.away.is_some() { "G" } else { "H" };
             client.send_numeric(
                 RPL_WHOREPLY,
                 &[
@@ -206,8 +183,8 @@ pub async fn handle_whois(state: &SharedState, client_id: ClientId, msg: &IrcMes
                 client.send_numeric(RPL_WHOISOPERATOR, &[&target.info.nick, oper_text]);
             }
             // RPL_AWAY — if target is away.
-            if let Some(away_msg) = state.get_away_message(target.id).await {
-                client.send_numeric(RPL_AWAY, &[&target.info.nick, &away_msg]);
+            if let Some(ref away_msg) = target.info.away {
+                client.send_numeric(RPL_AWAY, &[&target.info.nick, away_msg]);
             }
             // RPL_WHOISCHANNELS — filtered by +s visibility.
             let channels = state
@@ -252,13 +229,13 @@ pub async fn handle_away(state: &SharedState, client_id: ClientId, msg: &IrcMess
         && !away_text.is_empty()
     {
         // Set away.
-        state.set_away(client_id, away_text.clone()).await;
+        state.set_away(client_id, Some(away_text.clone())).await;
         client.send_numeric(RPL_NOWAWAY, &["You have been marked as being away"]);
         return;
     }
 
     // Clear away (no params or empty param).
-    state.clear_away(client_id).await;
+    state.set_away(client_id, None).await;
     client.send_numeric(RPL_UNAWAY, &["You are no longer marked as being away"]);
 }
 

@@ -6,6 +6,7 @@ members = [
     "crates/aircd",
     "crates/airc-mcp",
     "crates/airc-services",
+    "crates/aircd-redis-logger",
 ]
 resolver = "2"
 
@@ -38,3 +39,14 @@ tokio-rustls = "0.26"
 rustls = "0.23"
 webpki-roots = "0.26"
 rustls-pemfile = "2"
+crdts = "7.3.2"
+sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls", "sqlite", "migrate", "macros"] }
+sha3 = "0.10"
+bincode = { version = "2", features = ["serde"] }
+redis = { version = "0.27", features = ["tokio-comp"] }
+base64 = "0.22"
+sha2 = "0.10"
+hmac = "0.12"
+pbkdf2 = "0.12"
+tokio-util = { version = "0.7", features = ["rt"] }
+dashmap = "6"
