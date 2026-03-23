@@ -139,8 +139,8 @@ jobs:
           file: Dockerfile.prebuilt
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/aircd:latest
-            ghcr.io/${{ github.repository_owner }}/aircd:${{ steps.tag.outputs.version }}
+            ghcr.io/marlinski/aircd:latest
+            ghcr.io/marlinski/aircd:${{ steps.tag.outputs.version }}
 
   npm:
     name: Publish @marlinski/airc to npm
@@ -166,7 +166,7 @@ jobs:
         working-directory: packages/airc-client-ts
 
       - name: Bump version to match release tag
-        run: npm version ${{ steps.tag.outputs.version }} --no-git-tag-version
+        run: npm version ${{ steps.tag.outputs.version }} --no-git-tag-version --allow-same-version
         working-directory: packages/airc-client-ts
 
       - name: Publish
