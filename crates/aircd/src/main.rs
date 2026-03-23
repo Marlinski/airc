@@ -665,6 +665,13 @@ fn format_duration(secs: u64) -> String {
 // ---------------------------------------------------------------------------
 
 fn main() {
+    // rustls 0.23 requires an explicit CryptoProvider when multiple backends
+    // are present (aws-lc-rs via sqlx + ring via tokio-rustls).  Install
+    // aws-lc-rs as the process-wide default before anything else runs.
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("failed to install rustls CryptoProvider");
+
     let cli = Cli::parse();
 
     match cli.command {
