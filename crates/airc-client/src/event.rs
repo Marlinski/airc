@@ -75,6 +75,18 @@ pub enum IrcEvent {
     SaslLoggedIn { account: String },
     /// SASL authentication failed (904 ERR_SASLFAIL or 906 ERR_SASLABORTED).
     SaslFailed { code: u16, reason: String },
+    /// A user's away status changed (IRCv3 away-notify).
+    /// `message` is `None` when the user returned from away.
+    Away {
+        nick: String,
+        message: Option<String>,
+    },
+    /// A user's account changed (IRCv3 account-notify).
+    /// `account` is `None` when the user logged out (`ACCOUNT *`).
+    AccountNotify {
+        nick: String,
+        account: Option<String>,
+    },
 }
 
 /// Create a new `ChannelMessage` with the current timestamp.
@@ -84,15 +96,31 @@ pub fn new_channel_message(
     text: String,
     kind: MessageKind,
 ) -> ChannelMessage {
-    let timestamp = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    new_channel_message_with_ts(target, from, text, kind, None)
+}
+
+/// Create a new `ChannelMessage` with an optional timestamp.
+///
+/// If `timestamp` is `None`, uses the current system time.
+/// If `timestamp` is `Some(ts)`, uses that value (from IRCv3 `server-time`).
+pub fn new_channel_message_with_ts(
+    target: String,
+    from: String,
+    text: String,
+    kind: MessageKind,
+    timestamp: Option<u64>,
+) -> ChannelMessage {
+    let ts = timestamp.unwrap_or_else(|| {
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    });
     ChannelMessage {
         target,
         from,
         text,
         kind: kind as i32,
-        timestamp,
+        timestamp: ts,
     }
 }

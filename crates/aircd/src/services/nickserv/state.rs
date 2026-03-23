@@ -79,7 +79,11 @@ impl NickServState {
             for (nick_lower, rec) in &records {
                 ids.entry(nick_lower.clone()).or_insert_with(|| Identity {
                     nick: rec.nick.clone(),
-                    password_hash: rec.password_hash.clone(),
+                    scram_stored_key: rec.scram_stored_key.clone(),
+                    scram_server_key: rec.scram_server_key.clone(),
+                    scram_salt: rec.scram_salt.clone(),
+                    scram_iterations: rec.scram_iterations,
+                    bcrypt_hash: rec.bcrypt_hash.clone(),
                     pubkey_hex: rec.pubkey_hex.clone(),
                     registered_at: rec.registered_at,
                     reputation: rec.reputation,
@@ -133,16 +137,6 @@ impl NickServState {
             ps.upsert_nick(identity_to_nick_record(&identity)).await;
         }
         true
-    }
-
-    /// Get the password hash for a nick, if it has one.
-    #[allow(dead_code)]
-    pub async fn get_password_hash(&self, nick: &str) -> Option<Option<String>> {
-        self.identities
-            .read()
-            .unwrap()
-            .get(&nick.to_ascii_lowercase())
-            .map(|id| id.password_hash.clone())
     }
 
     /// Get the public key hex for a nick, if registered.
@@ -334,7 +328,11 @@ impl NickServState {
 fn identity_to_nick_record(id: &Identity) -> crate::persist::NickRecord {
     crate::persist::NickRecord {
         nick: id.nick.clone(),
-        password_hash: id.password_hash.clone(),
+        scram_stored_key: id.scram_stored_key.clone(),
+        scram_server_key: id.scram_server_key.clone(),
+        scram_salt: id.scram_salt.clone(),
+        scram_iterations: id.scram_iterations,
+        bcrypt_hash: id.bcrypt_hash.clone(),
         pubkey_hex: id.pubkey_hex.clone(),
         registered_at: id.registered_at,
         reputation: id.reputation,

@@ -1,9 +1,14 @@
 /**
- * IRC message parsing and serialization per RFC 2812.
+ * IRC message parsing and serialization per RFC 2812 + IRCv3 message-tags.
  *
  * Mirrors the Rust `IrcMessage` from `airc-shared/src/message.rs`.
  *
- * Wire format: `[:prefix] COMMAND [params...] [:trailing]\r\n`
+ * Wire format: `[@tags] [:prefix] COMMAND [params...] [:trailing]\r\n`
+ *
+ * IRCv3 message tags (https://ircv3.net/specs/extensions/message-tags) occupy
+ * an optional `@key=value;bare_key;...` block at the very start of the line,
+ * before the optional `:prefix`. Values use a custom escape sequence:
+ *   `\:` → `;`   `\s` → ` `   `\\` → `\`   `\r` → CR   `\n` → LF
  *
  * This module handles parsing raw lines (without the trailing `\r\n`) into
  * structured `IrcMessage` values, and serializing them back to wire format.
@@ -40,6 +45,12 @@ export class ParseError extends Error {
  * msg.prefix  // "server"
  * msg.params  // ["nick", "Welcome to IRC"]
  * ```
+ *
+ * @example
+ * ```ts
+ * const msg = IrcMessage.parse("@time=2026-01-01T00:00:00.000Z :nick!u@h PRIVMSG #chan :hello");
+ * msg.tags  // [["time", "2026-01-01T00:00:00.000Z"]]
+ * ```
  */
 export class IrcMessage {
   /** Optional message prefix (source). */
@@ -48,11 +59,28 @@ export class IrcMessage {
   command: Command;
   /** Command parameters. Trailing param stored without leading `:`. */
   params: string[];
+  /**
+   * IRCv3 message tags — key/value pairs from the `@tag=value;...` block.
+   * Bare tags (no `=`) have `value = undefined`. Values are already unescaped.
+   */
+  tags: Array<[string, string | undefined]>;
 
-  constructor(command: Command, params: string[] = [], prefix?: string) {
+  constructor(command: Command, params: string[] = [], prefix?: string, tags: Array<[string, string | undefined]> = []) {
     this.prefix = prefix;
     this.command = command;
     this.params = params;
+    this.tags = tags;
+  }
+
+  /**
+   * Look up a tag value by key. Returns the value string (may be empty),
+   * `undefined` if the tag is present as a bare key (no `=`), or `null` if
+   * the tag is absent entirely.
+   */
+  tag(key: string): string | undefined | null {
+    const entry = this.tags.find(([k]) => k === key);
+    if (entry === undefined) return null;
+    return entry[1];
   }
 
   // -- Parsing --------------------------------------------------------------
@@ -61,13 +89,29 @@ export class IrcMessage {
    * Parse a raw IRC line into an `IrcMessage`.
    *
    * The input should **not** contain the trailing `\r\n` (though it is
-   * tolerated and stripped).
+   * tolerated and stripped). IRCv3 message tags (`@key=value;...`) are parsed
+   * and stored in `tags`; the rest is parsed per RFC 2812.
    */
   static parse(line: string): IrcMessage {
     let rest = line.replace(/\r?\n$/, "");
 
     if (rest.length === 0) {
       throw new ParseError("empty", "empty message");
+    }
+
+    // --- IRCv3 tags (optional @-prefixed block) ---
+    let tags: Array<[string, string | undefined]> = [];
+    if (rest.startsWith("@")) {
+      const end = rest.indexOf(" ");
+      if (end < 0) {
+        throw new ParseError("missing_command", "missing command after tags");
+      }
+      tags = parseTags(rest.slice(1, end));
+      rest = rest.slice(end + 1).trimStart();
+    }
+
+    if (rest.length === 0) {
+      throw new ParseError("missing_command", "missing command");
     }
 
     // --- prefix ---
@@ -106,7 +150,7 @@ export class IrcMessage {
     // --- params ---
     const params = parseParams(remainder);
 
-    return new IrcMessage(command, params, prefix);
+    return new IrcMessage(command, params, prefix, tags);
   }
 
   // -- Serialization --------------------------------------------------------
@@ -147,7 +191,12 @@ export class IrcMessage {
 
   /** Return a clone with the given prefix set. */
   withPrefix(prefix: string): IrcMessage {
-    return new IrcMessage(this.command, [...this.params], prefix);
+    return new IrcMessage(this.command, [...this.params], prefix, [...this.tags]);
+  }
+
+  /** Return a clone with an additional tag appended. */
+  withTag(key: string, value?: string): IrcMessage {
+    return new IrcMessage(this.command, [...this.params], this.prefix, [...this.tags, [key, value]]);
   }
 
   /** Create a `PRIVMSG` message. */
@@ -253,4 +302,51 @@ function parseParams(input: string): string[] {
   }
 
   return params;
+}
+
+/**
+ * Parse an IRCv3 tag block into key/value pairs.
+ *
+ * Input is the raw string after the leading `@` and before the first space:
+ * `tag1=value1;tag2;tag3=val\:ue3`
+ *
+ * IRCv3 escape sequences in values:
+ *   `\:` → `;`   `\s` → ` `   `\\` → `\`   `\r` → CR   `\n` → LF
+ * Any other `\X` → `X` (unknown escapes pass through the char after backslash).
+ */
+function parseTags(raw: string): Array<[string, string | undefined]> {
+  if (raw.length === 0) return [];
+  return raw.split(";").map((part) => {
+    const eqIdx = part.indexOf("=");
+    if (eqIdx < 0) {
+      return [part, undefined] as [string, string | undefined];
+    }
+    const key = part.slice(0, eqIdx);
+    const value = unescapeTagValue(part.slice(eqIdx + 1));
+    return [key, value] as [string, string | undefined];
+  });
+}
+
+/** Unescape an IRCv3 tag value. */
+function unescapeTagValue(raw: string): string {
+  let out = "";
+  let i = 0;
+  while (i < raw.length) {
+    if (raw[i] === "\\" && i + 1 < raw.length) {
+      const next = raw[i + 1];
+      switch (next) {
+        case ":": out += ";"; break;
+        case "s": out += " "; break;
+        case "\\": out += "\\"; break;
+        case "r": out += "\r"; break;
+        case "n": out += "\n"; break;
+        default: out += next; break;
+      }
+      i += 2;
+    } else {
+      out += raw[i];
+      i++;
+    }
+  }
+  return out;
 }

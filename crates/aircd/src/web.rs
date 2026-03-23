@@ -106,12 +106,12 @@ async fn ws_upgrade(
 /// `last_pong` is updated whenever a `Pong` frame arrives in the reader task.
 /// If no `Pong` is received within 90 seconds of the last ping (60 s interval
 /// + 30 s grace period), the reader task drops the pipe writer (signalling EOF
-/// to the `Connection`) and the writer task sends a `Close` frame.
+///   to the `Connection`) and the writer task sends a `Close` frame.
 ///
 /// Constants:
 /// - `PING_INTERVAL` — how often to send a WS Ping (60 s)
 /// - `PONG_TIMEOUT`  — max age of `last_pong` before we close (90 s)
-
+///
 /// Control messages sent from the reader task to the writer task.
 enum WsCtrl {
     /// Ask the writer to send a WS Ping frame.

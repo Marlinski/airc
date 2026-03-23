@@ -11,6 +11,7 @@
 //! |----------------|--------------------------------------------------|
 //! | `connect`      | Start the daemon and connect to an IRC server    |
 //! | `disconnect`   | Disconnect and stop the daemon                   |
+//! | `register`     | Register a new nick with NickServ (one-shot)     |
 //! | `join`         | Join an IRC channel                              |
 //! | `part`         | Leave an IRC channel                             |
 //! | `say`          | Send a message to a channel or user              |
@@ -238,10 +239,27 @@ struct ConnectParams {
     /// Comma-separated list of channels to auto-join after connecting.
     #[serde(default)]
     channels: Option<String>,
+
+    /// Password for NickServ/SASL authentication (optional).
+    #[serde(default)]
+    password: Option<String>,
 }
 
 fn default_nick() -> String {
     "agent".to_string()
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct RegisterParams {
+    /// IRC server address (host:port), e.g. "irc.libera.chat:6667".
+    server: String,
+
+    /// Nickname to register.
+    #[serde(default = "default_nick")]
+    nick: String,
+
+    /// Password for the new NickServ account.
+    password: String,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -334,6 +352,10 @@ impl AircMcpServer {
             cmd.arg("--join").arg(channels);
         }
 
+        if let Some(ref pw) = params.password {
+            cmd.arg("--password").arg(pw);
+        }
+
         // Detach stdio so the daemon runs in the background.
         cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
@@ -361,6 +383,53 @@ impl AircMcpServer {
             }))
             .await;
 
+            Ok(CallToolResult::success(vec![Content::text(msg)]))
+        } else {
+            let err = if stderr.is_empty() {
+                stdout.trim().to_string()
+            } else {
+                stderr.trim().to_string()
+            };
+            Ok(CallToolResult::error(vec![Content::text(err)]))
+        }
+    }
+
+    /// Register a new nickname with NickServ.
+    ///
+    /// Connects to the IRC server as the given nick (no daemon started),
+    /// sends `PRIVMSG NickServ :REGISTER <password>`, waits for the
+    /// NickServ confirmation NOTICE, then disconnects. One-shot — does not
+    /// leave a persistent session running.
+    #[tool(
+        name = "register",
+        description = "Register a new IRC nickname with NickServ. Connects once, registers the nick with the given password, prints the NickServ response, then disconnects. Does not start a persistent daemon."
+    )]
+    async fn register(
+        &self,
+        #[tool(aggr)] params: RegisterParams,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        let exe = find_airc_binary().map_err(|e| {
+            rmcp::Error::internal_error(format!("cannot find airc binary: {e}"), None)
+        })?;
+
+        let output = std::process::Command::new(&exe)
+            .arg("register")
+            .arg(&params.server)
+            .arg("--nick")
+            .arg(&params.nick)
+            .arg(&params.password)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .map_err(|e| rmcp::Error::internal_error(format!("failed to spawn airc: {e}"), None))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        if output.status.success() {
+            let msg = stdout.trim();
+            let msg = if msg.is_empty() { "ok" } else { msg };
             Ok(CallToolResult::success(vec![Content::text(msg)]))
         } else {
             let err = if stderr.is_empty() {

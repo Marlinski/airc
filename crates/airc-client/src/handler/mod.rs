@@ -22,9 +22,10 @@ pub mod motd;
 pub mod registration;
 pub mod sasl;
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, RwLock, mpsc};
 
 use airc_shared::{Command, IrcMessage, Prefix};
 
@@ -47,6 +48,10 @@ pub struct ConnContext {
     pub event_tx: mpsc::Sender<IrcEvent>,
     pub state: ClientState,
     pub sasl_state: Arc<Mutex<Option<SaslHandshake>>>,
+    /// Password from config, used for NickServ IDENTIFY fallback.
+    pub password: Option<String>,
+    /// IRCv3 caps confirmed by the server via CAP ACK (excludes `sasl`).
+    pub negotiated_caps: Arc<RwLock<HashSet<String>>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -137,6 +142,16 @@ pub async fn handle_message(msg: IrcMessage, ctx: &ConnContext) {
         // -- TOPIC change -----------------------------------------------------
         Command::Topic => {
             channel::handle_topic(&msg, ctx).await;
+        }
+
+        // -- AWAY (IRCv3 away-notify) -----------------------------------------
+        Command::Away => {
+            channel::handle_away(&msg, ctx).await;
+        }
+
+        // -- ACCOUNT (IRCv3 account-notify) -----------------------------------
+        Command::Account => {
+            channel::handle_account(&msg, ctx).await;
         }
 
         // -- PRIVMSG ----------------------------------------------------------

@@ -1,7 +1,6 @@
 //! TCP accept loop — the heart of the AIRC server.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use std::time::Duration;
 
@@ -341,13 +340,13 @@ impl Server {
                 let peers = self.state.peers_in_shared_channels(client_id).await;
                 if !peers.is_empty() {
                     let nick_msg = IrcMessage {
+                        tags: vec![],
                         prefix: old_prefix,
                         command: airc_shared::Command::Nick,
                         params: vec![new_nick],
                     };
-                    let line: Arc<str> = nick_msg.serialize().into();
                     for peer in &peers {
-                        peer.send_line(&line);
+                        peer.send_message_tagged(&nick_msg);
                     }
                 }
             }
@@ -364,13 +363,13 @@ impl Server {
                 if !local_members.is_empty() {
                     let prefix = client_info.map(|c| c.prefix());
                     let join_msg = IrcMessage {
+                        tags: vec![],
                         prefix,
                         command: airc_shared::Command::Join,
                         params: vec![channel],
                     };
-                    let line: Arc<str> = join_msg.serialize().into();
                     for member in &local_members {
-                        member.send_line(&line);
+                        member.send_message_tagged(&join_msg);
                     }
                 }
             }
@@ -393,13 +392,13 @@ impl Server {
                         params.push(r);
                     }
                     let part_msg = IrcMessage {
+                        tags: vec![],
                         prefix,
                         command: airc_shared::Command::Part,
                         params,
                     };
-                    let line: Arc<str> = part_msg.serialize().into();
                     for member in &members {
-                        member.send_line(&line);
+                        member.send_message_tagged(&part_msg);
                     }
                 }
 
@@ -426,13 +425,13 @@ impl Server {
                         params.push(r);
                     }
                     let quit_msg = IrcMessage {
+                        tags: vec![],
                         prefix,
                         command: airc_shared::Command::Quit,
                         params,
                     };
-                    let line: Arc<str> = quit_msg.serialize().into();
                     for peer in &peers {
-                        peer.send_line(&line);
+                        peer.send_message_tagged(&quit_msg);
                     }
                 }
             }
@@ -447,6 +446,7 @@ impl Server {
             } => {
                 let prefix = self.state.get_client(client_id).await.map(|c| c.prefix());
                 let msg = IrcMessage {
+                    tags: vec![],
                     prefix,
                     command: airc_shared::Command::Privmsg,
                     params: vec![target.clone(), text],
@@ -455,15 +455,14 @@ impl Server {
                 if airc_shared::validate::is_channel_name(&target) {
                     // Channel message — deliver to local members.
                     if let Some(members) = self.state.channel_members(&target).await {
-                        let line: Arc<str> = msg.serialize().into();
                         for member in &members {
-                            member.send_line(&line);
+                            member.send_message_tagged(&msg);
                         }
                     }
                 } else {
                     // DM — deliver to the local nick.
                     if let Some(client) = self.state.find_client_by_nick(&target).await {
-                        client.send_message(&msg);
+                        client.send_message_tagged(&msg);
                     }
                 }
             }
@@ -478,6 +477,7 @@ impl Server {
             } => {
                 let prefix = self.state.get_client(client_id).await.map(|c| c.prefix());
                 let msg = IrcMessage {
+                    tags: vec![],
                     prefix,
                     command: airc_shared::Command::Notice,
                     params: vec![target.clone(), text],
@@ -485,14 +485,13 @@ impl Server {
 
                 if airc_shared::validate::is_channel_name(&target) {
                     if let Some(members) = self.state.channel_members(&target).await {
-                        let line: Arc<str> = msg.serialize().into();
                         for member in &members {
-                            member.send_line(&line);
+                            member.send_message_tagged(&msg);
                         }
                     }
                 } else {
                     if let Some(client) = self.state.find_client_by_nick(&target).await {
-                        client.send_message(&msg);
+                        client.send_message_tagged(&msg);
                     }
                 }
             }
@@ -523,13 +522,13 @@ impl Server {
                     .await
                 {
                     let topic_msg = IrcMessage {
+                        tags: vec![],
                         prefix,
                         command: airc_shared::Command::Topic,
                         params: vec![channel, text],
                     };
-                    let line: Arc<str> = topic_msg.serialize().into();
                     for member in &members {
-                        member.send_line(&line);
+                        member.send_message_tagged(&topic_msg);
                     }
                 }
             }
@@ -611,13 +610,13 @@ impl Server {
                 // Notify local channel members.
                 if let Some(members) = self.state.channel_members(&target).await {
                     let mode_msg = IrcMessage {
+                        tags: vec![],
                         prefix,
                         command: airc_shared::Command::Mode,
                         params: vec![target, mode_string],
                     };
-                    let line: Arc<str> = mode_msg.serialize().into();
                     for member in &members {
-                        member.send_line(&line);
+                        member.send_message_tagged(&mode_msg);
                     }
                 }
             }
@@ -644,13 +643,13 @@ impl Server {
                 // Notify local members (including the kicked user) BEFORE removing.
                 if let Some(members) = self.state.channel_members(&channel).await {
                     let kick_msg = IrcMessage {
+                        tags: vec![],
                         prefix,
                         command: airc_shared::Command::Kick,
                         params: vec![channel.clone(), target_nick, reason],
                     };
-                    let line: Arc<str> = kick_msg.serialize().into();
                     for member in &members {
-                        member.send_line(&line);
+                        member.send_message_tagged(&kick_msg);
                     }
                 }
 
@@ -723,9 +722,8 @@ impl Server {
                     for removed in &removed_clients {
                         let quit_msg =
                             IrcMessage::quit(Some(&netsplit_reason)).with_prefix(removed.prefix());
-                        let line: Arc<str> = quit_msg.serialize().into();
                         for peer in &local_peers {
-                            peer.send_line(&line);
+                            peer.send_message_tagged(&quit_msg);
                         }
                     }
                 }
@@ -765,11 +763,10 @@ impl Server {
                         Some(peer_hash) => peer_hash != our_hash,
                         None => true, // peer is missing this CRDT entirely
                     };
-                    if needs_send {
-                        if let Some(blob) = ps.export_crdt(crdt_id).await {
+                    if needs_send
+                        && let Some(blob) = ps.export_crdt(crdt_id).await {
                             diverged.insert(crdt_id.clone(), blob);
                         }
-                    }
                 }
 
                 if !diverged.is_empty() {

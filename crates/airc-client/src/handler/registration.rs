@@ -22,6 +22,18 @@ pub async fn handle_welcome(msg: &IrcMessage, ctx: &ConnContext) {
     ctx.state.set_nick(nick.clone()).await;
     ctx.state.set_server_name(server.clone()).await;
     ctx.state.set_registered().await;
+
+    // NickServ IDENTIFY fallback: if we have a password but SASL did not
+    // complete (e.g., server didn't advertise SASL, or SASL failed), send
+    // a NickServ IDENTIFY as a best-effort fallback.
+    if let Some(ref pw) = ctx.password
+        && !ctx.state.is_sasl_logged_in().await {
+            let _ = ctx
+                .line_tx
+                .send(IrcMessage::privmsg("NickServ", &format!("IDENTIFY {pw}")).serialize())
+                .await;
+        }
+
     let _ = ctx
         .event_tx
         .send(IrcEvent::Registered {
@@ -55,10 +67,14 @@ pub async fn handle_names_reply(msg: &IrcMessage, ctx: &ConnContext) {
     if msg.params.len() >= 4 {
         let channel = &msg.params[2];
         let names_str = &msg.params[3];
+        // Strip all leading prefix chars.  With `multi-prefix` a nick may
+        // carry multiple prefixes (e.g. `@+nick`).  `trim_start_matches` with
+        // a char slice strips all leading chars in the set, so this handles
+        // both the single-prefix and multi-prefix cases correctly.
         let members: Vec<String> = names_str
             .split_whitespace()
             .map(|n| {
-                n.trim_start_matches(|c| c == '@' || c == '+' || c == '%')
+                n.trim_start_matches(['@', '+', '%', '~', '&'])
                     .to_string()
             })
             .collect();

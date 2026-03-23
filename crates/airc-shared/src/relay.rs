@@ -10,9 +10,9 @@
 //! types and provides the Redis channel name constants.
 
 pub use crate::relay_proto::{
-    relay_envelope::Event as RelayEvent, AntiEntropyRequest, AntiEntropyResponse, ClientDown,
-    ClientIntro, CrdtDelta, Join, Kick, Mode, NickChange, NodeDown, NodeUp, Notice, Part, Privmsg,
-    Quit, RelayEnvelope, Topic,
+    AntiEntropyRequest, AntiEntropyResponse, ClientDown, ClientIntro, CrdtDelta, Join, Kick, Mode,
+    NickChange, NodeDown, NodeUp, Notice, Part, Privmsg, Quit, RelayEnvelope, Topic,
+    relay_envelope::Event as RelayEvent,
 };
 
 // ---------------------------------------------------------------------------

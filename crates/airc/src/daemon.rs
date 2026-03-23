@@ -85,11 +85,12 @@ pub async fn start(
     nick: String,
     auto_join: Vec<String>,
     tls_mode: TlsMode,
+    password: Option<String>,
     foreground: bool,
 ) -> Result<(), String> {
     if !foreground {
         // Fork into background using a pipe to relay the MOTD back.
-        return spawn_background(&session_id, &server, &nick, &auto_join, tls_mode);
+        return spawn_background(&session_id, &server, &nick, &auto_join, tls_mode, password);
     }
 
     // --- Foreground mode: this IS the daemon. ---
@@ -120,6 +121,11 @@ pub async fn start(
     let config = airc_client::ClientConfig::new(&server, &nick)
         .with_auto_join(auto_join)
         .with_tls(tls_mode);
+    let config = if let Some(ref p) = password {
+        config.with_password(p)
+    } else {
+        config
+    };
 
     let (client, motd_lines, mut event_rx) = IrcClient::connect(config)
         .await
@@ -227,6 +233,7 @@ fn spawn_background(
     nick: &str,
     auto_join: &[String],
     tls_mode: TlsMode,
+    password: Option<String>,
 ) -> Result<(), String> {
     // Create a pipe: child writes MOTD to fds[1], parent reads from fds[0].
     let mut fds = [0i32; 2];
@@ -259,6 +266,9 @@ fn spawn_background(
         TlsMode::Preferred => {
             // Default — no flag needed.
         }
+    }
+    if let Some(ref pw) = password {
+        cmd.arg("--password").arg(pw);
     }
 
     // Pass the pipe write fd number to the child via an env var.
@@ -399,6 +409,18 @@ fn log_irc_event(logger: &SharedLogger, log_ring: &SharedLogRing, event: &IrcEve
             let nick = from.as_deref().unwrap_or("server");
             Some(log_event_now(EventType::Notice, target, nick, text))
         }
+        IrcEvent::Away { nick, message } => Some(log_event_now(
+            EventType::Away,
+            "_away",
+            nick,
+            message.as_deref().unwrap_or(""),
+        )),
+        IrcEvent::AccountNotify { nick, account } => Some(log_event_now(
+            EventType::Account,
+            "_account",
+            nick,
+            account.as_deref().unwrap_or(""),
+        )),
         // Registered, Disconnected, Raw — not logged.
         _ => None,
     };

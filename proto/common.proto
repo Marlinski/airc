@@ -58,6 +58,8 @@ enum EventType {
   TOPIC   = 5;
   NICK    = 6;   // nick change (content = new nick)
   NOTICE  = 7;
+  AWAY    = 8;   // away-notify: content = away message, empty = returned
+  ACCOUNT = 9;   // account-notify: content = account name, empty = logged out
 }
 
 // One row in a channel log file.

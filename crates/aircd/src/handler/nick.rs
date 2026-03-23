@@ -1,7 +1,5 @@
 //! NICK — change nickname after registration.
 
-use std::sync::Arc;
-
 use airc_shared::IrcMessage;
 use airc_shared::reply::*;
 use tracing::debug;
@@ -26,12 +24,11 @@ pub async fn handle_nick(state: &SharedState, client_id: ClientId, msg: &IrcMess
         Ok(()) => {
             // Notify the client and all peers in shared channels.
             let nick_msg = IrcMessage::nick(new_nick).with_prefix(old_prefix.clone());
-            let line: Arc<str> = nick_msg.serialize().into();
-            client.send_line(&line);
+            client.send_message_tagged(&nick_msg);
 
             let peers = state.peers_in_shared_channels(client_id).await;
             for peer in &peers {
-                peer.send_line(&line);
+                peer.send_message_tagged(&nick_msg);
             }
 
             // Relay nick change to remote nodes.

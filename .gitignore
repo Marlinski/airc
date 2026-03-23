@@ -25,3 +25,7 @@ dist/
 # Persistence files (runtime data)
 nickserv.json
 chanserv.json
+data/
+
+# Deployment scripts and configuration (private)
+deploy/

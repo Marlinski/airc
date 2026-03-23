@@ -28,8 +28,17 @@ export interface ClientConfig {
   /** Real name / description. Defaults to nick if not set. */
   realname?: string;
 
-  /** Connection password (optional, sent as PASS before NICK/USER). */
+  /**
+   * Password for authentication. Used for SASL PLAIN if the server supports
+   * it, otherwise falls back to PRIVMSG NickServ :IDENTIFY.
+   */
   password?: string;
+
+  /**
+   * SASL account name (authcid). Defaults to `nick` if not set.
+   * Only used when `password` is also set.
+   */
+  saslAccount?: string;
 
   /** Channels to auto-join after registration. */
   autoJoin?: string[];
@@ -39,13 +48,14 @@ export interface ClientConfig {
 }
 
 /** Resolve optional config fields to their defaults. */
-export function resolveConfig(config: ClientConfig): Required<Omit<ClientConfig, "password">> & { password?: string } {
+export function resolveConfig(config: ClientConfig): Required<Omit<ClientConfig, "password" | "saslAccount">> & { password?: string; saslAccount?: string } {
   return {
     url: config.url ?? DEFAULT_URL,
     nick: config.nick,
     username: config.username ?? config.nick,
     realname: config.realname ?? config.nick,
     password: config.password,
+    saslAccount: config.saslAccount,
     autoJoin: config.autoJoin ?? [],
     bufferSize: config.bufferSize ?? 1000,
   };

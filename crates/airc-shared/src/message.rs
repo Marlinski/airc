@@ -1,8 +1,8 @@
-//! IRC message parsing and serialization per RFC 2812.
+//! IRC message parsing and serialization per RFC 2812 with IRCv3 message-tags.
 //!
 //! An IRC message has the wire format:
 //! ```text
-//! [:prefix] COMMAND [params...] [:trailing]\r\n
+//! [@tags] [:prefix] COMMAND [params...] [:trailing]\r\n
 //! ```
 //!
 //! This module handles parsing raw lines (without the trailing `\r\n`) into
@@ -90,6 +90,8 @@ pub enum Command {
     // -- Availability -------------------------------------------------------
     /// `AWAY` — set or clear away status.
     Away,
+    /// `ACCOUNT` — IRCv3 account-notify: broadcast account name change.
+    Account,
 
     // -- Moderation / social -------------------------------------------------
     /// `SILENCE` — manage the server-side silence list (+nick / -nick / list).
@@ -138,10 +140,8 @@ impl Command {
     /// [`Command::Unknown`].
     pub fn from_str_upper(s: &str) -> Self {
         // Try numeric first — must be exactly three ASCII digits.
-        if s.len() == 3 && s.bytes().all(|b| b.is_ascii_digit()) {
-            if let Ok(n) = s.parse::<u16>() {
-                return Command::Numeric(n);
-            }
+        if s.len() == 3 && s.bytes().all(|b| b.is_ascii_digit()) && let Ok(n) = s.parse::<u16>() {
+            return Command::Numeric(n);
         }
 
         match s {
@@ -163,6 +163,7 @@ impl Command {
             "NAMES" => Command::Names,
             "ISON" => Command::Ison,
             "AWAY" => Command::Away,
+            "ACCOUNT" => Command::Account,
             "SILENCE" => Command::Silence,
             "FRIEND" => Command::Friend,
             "OPER" => Command::Oper,
@@ -199,6 +200,7 @@ impl fmt::Display for Command {
             Command::Names => f.write_str("NAMES"),
             Command::Ison => f.write_str("ISON"),
             Command::Away => f.write_str("AWAY"),
+            Command::Account => f.write_str("ACCOUNT"),
             Command::Silence => f.write_str("SILENCE"),
             Command::Friend => f.write_str("FRIEND"),
             Command::Oper => f.write_str("OPER"),
@@ -232,6 +234,12 @@ impl fmt::Display for Command {
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IrcMessage {
+    /// IRCv3 message tags. Empty for untagged messages.
+    ///
+    /// Each entry is `(key, value)` where value is `None` for boolean
+    /// (value-less) tags.  Order is preserved and duplicates are allowed
+    /// as the spec does not prohibit them.
+    pub tags: Vec<(String, Option<String>)>,
     /// Optional message prefix (source). For server-originated messages this is
     /// typically `nick!user@host` or a server name.
     pub prefix: Option<String>,
@@ -261,6 +269,17 @@ impl IrcMessage {
         }
 
         let mut rest = line;
+
+        // --- tags (IRCv3) --------------------------------------------------
+        let tags = if rest.starts_with('@') {
+            let end = rest.find(' ').ok_or(ParseError::MissingCommand)?;
+            let tags_block = &rest[1..end]; // strip leading '@'
+            rest = &rest[end + 1..];
+            rest = rest.trim_start();
+            parse_tags(tags_block)
+        } else {
+            vec![]
+        };
 
         // --- prefix --------------------------------------------------------
         let prefix = if rest.starts_with(':') {
@@ -293,6 +312,7 @@ impl IrcMessage {
         let params = parse_params(remainder);
 
         Ok(IrcMessage {
+            tags,
             prefix,
             command,
             params,
@@ -316,9 +336,19 @@ impl IrcMessage {
         self
     }
 
+    /// Return a clone with the given tag added.
+    ///
+    /// `value` is `None` for boolean (value-less) tags.
+    #[must_use]
+    pub fn with_tag(mut self, key: impl Into<String>, value: Option<impl Into<String>>) -> Self {
+        self.tags.push((key.into(), value.map(|v| v.into())));
+        self
+    }
+
     /// Create a `PRIVMSG` message.
     pub fn privmsg(target: &str, text: &str) -> Self {
         IrcMessage {
+            tags: vec![],
             prefix: None,
             command: Command::Privmsg,
             params: vec![target.to_string(), text.to_string()],
@@ -328,6 +358,7 @@ impl IrcMessage {
     /// Create a `NOTICE` message.
     pub fn notice(target: &str, text: &str) -> Self {
         IrcMessage {
+            tags: vec![],
             prefix: None,
             command: Command::Notice,
             params: vec![target.to_string(), text.to_string()],
@@ -337,6 +368,7 @@ impl IrcMessage {
     /// Create a `NICK` message.
     pub fn nick(nickname: &str) -> Self {
         IrcMessage {
+            tags: vec![],
             prefix: None,
             command: Command::Nick,
             params: vec![nickname.to_string()],
@@ -346,6 +378,7 @@ impl IrcMessage {
     /// Create a `JOIN` message.
     pub fn join(channel: &str) -> Self {
         IrcMessage {
+            tags: vec![],
             prefix: None,
             command: Command::Join,
             params: vec![channel.to_string()],
@@ -359,6 +392,7 @@ impl IrcMessage {
             params.push(r.to_string());
         }
         IrcMessage {
+            tags: vec![],
             prefix: None,
             command: Command::Part,
             params,
@@ -372,6 +406,7 @@ impl IrcMessage {
             None => vec![],
         };
         IrcMessage {
+            tags: vec![],
             prefix: None,
             command: Command::Quit,
             params,
@@ -381,6 +416,7 @@ impl IrcMessage {
     /// Create a `PING` message.
     pub fn ping(token: &str) -> Self {
         IrcMessage {
+            tags: vec![],
             prefix: None,
             command: Command::Ping,
             params: vec![token.to_string()],
@@ -390,6 +426,7 @@ impl IrcMessage {
     /// Create a `PONG` message.
     pub fn pong(token: &str) -> Self {
         IrcMessage {
+            tags: vec![],
             prefix: None,
             command: Command::Pong,
             params: vec![token.to_string()],
@@ -405,6 +442,7 @@ impl IrcMessage {
     /// ```
     pub fn user(username: &str, realname: &str) -> Self {
         IrcMessage {
+            tags: vec![],
             prefix: None,
             command: Command::User,
             params: vec![
@@ -419,6 +457,7 @@ impl IrcMessage {
     /// Create a `PASS` message.
     pub fn pass(password: &str) -> Self {
         IrcMessage {
+            tags: vec![],
             prefix: None,
             command: Command::Pass,
             params: vec![password.to_string()],
@@ -434,6 +473,7 @@ impl IrcMessage {
     /// ```
     pub fn oper(name: &str, password: &str) -> Self {
         IrcMessage {
+            tags: vec![],
             prefix: None,
             command: Command::Oper,
             params: vec![name.to_string(), password.to_string()],
@@ -454,6 +494,7 @@ impl IrcMessage {
     /// ```
     pub fn kill(nick: &str, reason: &str) -> Self {
         IrcMessage {
+            tags: vec![],
             prefix: None,
             command: Command::Kill,
             params: vec![nick.to_string(), reason.to_string()],
@@ -467,6 +508,7 @@ impl IrcMessage {
             params.push(m.to_string());
         }
         IrcMessage {
+            tags: vec![],
             prefix: None,
             command: Command::Mode,
             params,
@@ -481,6 +523,7 @@ impl IrcMessage {
         let mut p = vec![target.to_string()];
         p.extend(params.iter().map(|s| s.to_string()));
         IrcMessage {
+            tags: vec![],
             prefix: None,
             command: Command::Numeric(code),
             params: p,
@@ -492,6 +535,22 @@ impl IrcMessage {
 
 impl fmt::Display for IrcMessage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Tags (IRCv3)
+        if !self.tags.is_empty() {
+            f.write_str("@")?;
+            for (i, (key, value)) in self.tags.iter().enumerate() {
+                if i > 0 {
+                    f.write_str(";")?;
+                }
+                f.write_str(key)?;
+                if let Some(val) = value {
+                    f.write_str("=")?;
+                    write!(f, "{}", escape_tag_value(val))?;
+                }
+            }
+            f.write_str(" ")?;
+        }
+
         // Prefix
         if let Some(ref pfx) = self.prefix {
             write!(f, ":{pfx} ")?;
@@ -536,6 +595,91 @@ impl<'de> Deserialize<'de> for IrcMessage {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+/// Parse the tags block (the part after `@` and before the first space) into
+/// a list of `(key, Option<value>)` pairs.
+///
+/// Tags are separated by `;`. Each tag is either `key=value` or bare `key`.
+/// Values are unescaped per the IRCv3 spec.
+fn parse_tags(block: &str) -> Vec<(String, Option<String>)> {
+    let mut tags = Vec::new();
+    for token in block.split(';') {
+        if token.is_empty() {
+            continue;
+        }
+        match token.find('=') {
+            Some(eq) => {
+                let key = token[..eq].to_string();
+                let raw_value = &token[eq + 1..];
+                tags.push((key, Some(unescape_tag_value(raw_value))));
+            }
+            None => {
+                tags.push((token.to_string(), None));
+            }
+        }
+    }
+    tags
+}
+
+/// Unescape a tag value per the IRCv3 message-tags spec.
+///
+/// Escape sequences:
+/// - `\:` → `;`
+/// - `\s` → ` `
+/// - `\\` → `\`
+/// - `\r` → CR
+/// - `\n` → LF
+/// - Any other `\X` → `X` (strip backslash)
+fn unescape_tag_value(raw: &str) -> String {
+    let mut result = String::with_capacity(raw.len());
+    let mut chars = raw.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some(':') => result.push(';'),
+                Some('s') => result.push(' '),
+                Some('\\') => result.push('\\'),
+                Some('r') => result.push('\r'),
+                Some('n') => result.push('\n'),
+                Some(other) => result.push(other),
+                None => {} // trailing backslash — drop it
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
+/// A helper that returns an escaped representation of a tag value.
+///
+/// Characters that must be escaped per the IRCv3 spec:
+/// - `;`  → `\:`
+/// - ` `  → `\s`
+/// - `\`  → `\\`
+/// - CR   → `\r`
+/// - LF   → `\n`
+fn escape_tag_value(value: &str) -> impl fmt::Display + '_ {
+    struct Escaped<'a>(&'a str);
+
+    impl fmt::Display for Escaped<'_> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            for ch in self.0.chars() {
+                match ch {
+                    ';' => f.write_str("\\:")?,
+                    ' ' => f.write_str("\\s")?,
+                    '\\' => f.write_str("\\\\")?,
+                    '\r' => f.write_str("\\r")?,
+                    '\n' => f.write_str("\\n")?,
+                    other => write!(f, "{other}")?,
+                }
+            }
+            Ok(())
+        }
+    }
+
+    Escaped(value)
+}
+
 /// Parse the parameter portion of an IRC message into a `Vec<String>`.
 ///
 /// Parameters are space-separated. A parameter starting with `:` begins the
@@ -547,8 +691,8 @@ fn parse_params(input: &str) -> Vec<String> {
 
     while !rest.is_empty() {
         // Trailing parameter — everything after the `:` is one parameter.
-        if rest.starts_with(':') {
-            params.push(rest[1..].to_string());
+        if let Some(trailing) = rest.strip_prefix(':') {
+            params.push(trailing.to_string());
             break;
         }
 
@@ -586,6 +730,7 @@ mod tests {
     #[test]
     fn parse_simple_command() {
         let msg = IrcMessage::parse("QUIT").unwrap();
+        assert_eq!(msg.tags, vec![]);
         assert_eq!(msg.prefix, None);
         assert_eq!(msg.command, Command::Quit);
         assert!(msg.params.is_empty());
@@ -594,6 +739,7 @@ mod tests {
     #[test]
     fn parse_command_with_params() {
         let msg = IrcMessage::parse("NICK alice").unwrap();
+        assert_eq!(msg.tags, vec![]);
         assert_eq!(msg.command, Command::Nick);
         assert_eq!(msg.params, vec!["alice"]);
     }
@@ -601,6 +747,7 @@ mod tests {
     #[test]
     fn parse_prefix_and_trailing() {
         let msg = IrcMessage::parse(":nick!user@host PRIVMSG #chan :hello world").unwrap();
+        assert_eq!(msg.tags, vec![]);
         assert_eq!(msg.prefix.as_deref(), Some("nick!user@host"));
         assert_eq!(msg.command, Command::Privmsg);
         assert_eq!(msg.params, vec!["#chan", "hello world"]);
@@ -609,6 +756,7 @@ mod tests {
     #[test]
     fn parse_numeric_reply() {
         let msg = IrcMessage::parse(":server 001 nick :Welcome to the IRC Network").unwrap();
+        assert_eq!(msg.tags, vec![]);
         assert_eq!(msg.prefix.as_deref(), Some("server"));
         assert_eq!(msg.command, Command::Numeric(1));
         assert_eq!(msg.params, vec!["nick", "Welcome to the IRC Network"]);
@@ -623,6 +771,7 @@ mod tests {
     #[test]
     fn parse_no_params() {
         let msg = IrcMessage::parse(":server PING").unwrap();
+        assert_eq!(msg.tags, vec![]);
         assert_eq!(msg.prefix.as_deref(), Some("server"));
         assert_eq!(msg.command, Command::Ping);
         assert!(msg.params.is_empty());
@@ -727,6 +876,7 @@ mod tests {
     #[test]
     fn serialize_simple() {
         let msg = IrcMessage {
+            tags: vec![],
             prefix: None,
             command: Command::Quit,
             params: vec![],
@@ -759,6 +909,7 @@ mod tests {
     fn serialize_numeric_padded() {
         // Numeric codes < 100 should be zero-padded to 3 digits.
         let msg = IrcMessage {
+            tags: vec![],
             prefix: None,
             command: Command::Numeric(42),
             params: vec![],
@@ -769,6 +920,7 @@ mod tests {
     #[test]
     fn serialize_empty_trailing() {
         let msg = IrcMessage {
+            tags: vec![],
             prefix: None,
             command: Command::Topic,
             params: vec!["#chan".to_string(), "".to_string()],
@@ -779,6 +931,7 @@ mod tests {
     #[test]
     fn serialize_trailing_starts_with_colon() {
         let msg = IrcMessage {
+            tags: vec![],
             prefix: None,
             command: Command::Privmsg,
             params: vec!["#chan".to_string(), ":)".to_string()],
@@ -831,6 +984,7 @@ mod tests {
         assert_eq!(msg.command, Command::Privmsg);
         assert_eq!(msg.params, vec!["#test", "hi there"]);
         assert_eq!(msg.prefix, None);
+        assert_eq!(msg.tags, vec![]);
     }
 
     #[test]
@@ -879,5 +1033,208 @@ mod tests {
         assert_eq!(Command::Numeric(1).to_string(), "001");
         assert_eq!(Command::Numeric(433).to_string(), "433");
         assert_eq!(Command::Unknown("FOO".into()).to_string(), "FOO");
+    }
+
+    // -- IRCv3 message-tags tests -------------------------------------------
+
+    #[test]
+    fn parse_tags_key_value() {
+        let msg = IrcMessage::parse("@time=2023-01-01T00:00:00.000Z PRIVMSG #chan :hello").unwrap();
+        assert_eq!(
+            msg.tags,
+            vec![(
+                "time".to_string(),
+                Some("2023-01-01T00:00:00.000Z".to_string())
+            )]
+        );
+        assert_eq!(msg.prefix, None);
+        assert_eq!(msg.command, Command::Privmsg);
+        assert_eq!(msg.params, vec!["#chan", "hello"]);
+    }
+
+    #[test]
+    fn parse_tags_bare_key() {
+        let msg = IrcMessage::parse("@draft/typing PRIVMSG #chan :hi").unwrap();
+        assert_eq!(msg.tags, vec![("draft/typing".to_string(), None)]);
+    }
+
+    #[test]
+    fn parse_tags_multiple() {
+        let msg = IrcMessage::parse("@tag1=value1;tag2;tag3=value3 PING token").unwrap();
+        assert_eq!(
+            msg.tags,
+            vec![
+                ("tag1".to_string(), Some("value1".to_string())),
+                ("tag2".to_string(), None),
+                ("tag3".to_string(), Some("value3".to_string())),
+            ]
+        );
+        assert_eq!(msg.command, Command::Ping);
+    }
+
+    #[test]
+    fn parse_tags_with_prefix() {
+        let msg = IrcMessage::parse(
+            "@time=2023-01-01T00:00:00.000Z;account=alice :alice!u@h PRIVMSG #chan :hello",
+        )
+        .unwrap();
+        assert_eq!(
+            msg.tags,
+            vec![
+                (
+                    "time".to_string(),
+                    Some("2023-01-01T00:00:00.000Z".to_string())
+                ),
+                ("account".to_string(), Some("alice".to_string())),
+            ]
+        );
+        assert_eq!(msg.prefix.as_deref(), Some("alice!u@h"));
+        assert_eq!(msg.command, Command::Privmsg);
+        assert_eq!(msg.params, vec!["#chan", "hello"]);
+    }
+
+    #[test]
+    fn parse_tags_no_prefix() {
+        // Tags present, no prefix — valid per spec.
+        let msg = IrcMessage::parse("@tag=val PRIVMSG #chan :hello").unwrap();
+        assert_eq!(msg.tags, vec![("tag".to_string(), Some("val".to_string()))]);
+        assert_eq!(msg.prefix, None);
+        assert_eq!(msg.command, Command::Privmsg);
+    }
+
+    #[test]
+    fn parse_tags_unescape_space() {
+        let msg = IrcMessage::parse("@label=hello\\sworld PING x").unwrap();
+        assert_eq!(
+            msg.tags,
+            vec![("label".to_string(), Some("hello world".to_string()))]
+        );
+    }
+
+    #[test]
+    fn parse_tags_unescape_semicolon() {
+        let msg = IrcMessage::parse("@label=a\\:b PING x").unwrap();
+        assert_eq!(
+            msg.tags,
+            vec![("label".to_string(), Some("a;b".to_string()))]
+        );
+    }
+
+    #[test]
+    fn parse_tags_unescape_backslash() {
+        let msg = IrcMessage::parse("@label=a\\\\b PING x").unwrap();
+        assert_eq!(
+            msg.tags,
+            vec![("label".to_string(), Some("a\\b".to_string()))]
+        );
+    }
+
+    #[test]
+    fn parse_tags_unescape_cr_lf() {
+        let msg = IrcMessage::parse("@label=a\\r\\nb PING x").unwrap();
+        assert_eq!(
+            msg.tags,
+            vec![("label".to_string(), Some("a\r\nb".to_string()))]
+        );
+    }
+
+    #[test]
+    fn parse_tags_unescape_unknown_escape() {
+        // Any other `\X` → `X`
+        let msg = IrcMessage::parse("@label=a\\zb PING x").unwrap();
+        assert_eq!(
+            msg.tags,
+            vec![("label".to_string(), Some("azb".to_string()))]
+        );
+    }
+
+    #[test]
+    fn serialize_tags_key_value() {
+        let msg =
+            IrcMessage::privmsg("#chan", "hi").with_tag("time", Some("2023-01-01T00:00:00.000Z"));
+        assert_eq!(
+            msg.serialize(),
+            "@time=2023-01-01T00:00:00.000Z PRIVMSG #chan hi"
+        );
+    }
+
+    #[test]
+    fn serialize_tags_bare_key() {
+        let msg = IrcMessage::privmsg("#chan", "hi").with_tag("msgid", None::<String>);
+        assert_eq!(msg.serialize(), "@msgid PRIVMSG #chan hi");
+    }
+
+    #[test]
+    fn serialize_tags_multiple() {
+        let msg = IrcMessage::privmsg("#chan", "hi")
+            .with_tag("tag1", Some("value1"))
+            .with_tag("tag2", None::<String>)
+            .with_tag("tag3", Some("value3"));
+        assert_eq!(
+            msg.serialize(),
+            "@tag1=value1;tag2;tag3=value3 PRIVMSG #chan hi"
+        );
+    }
+
+    #[test]
+    fn serialize_tags_escape_semicolon() {
+        let msg = IrcMessage::ping("x").with_tag("label", Some("a;b"));
+        assert_eq!(msg.serialize(), "@label=a\\:b PING x");
+    }
+
+    #[test]
+    fn serialize_tags_escape_space() {
+        let msg = IrcMessage::ping("x").with_tag("label", Some("hello world"));
+        assert_eq!(msg.serialize(), "@label=hello\\sworld PING x");
+    }
+
+    #[test]
+    fn serialize_tags_escape_backslash() {
+        let msg = IrcMessage::ping("x").with_tag("label", Some("a\\b"));
+        assert_eq!(msg.serialize(), "@label=a\\\\b PING x");
+    }
+
+    #[test]
+    fn roundtrip_tags_with_prefix() {
+        let raw =
+            "@time=2023-01-01T00:00:00.000Z;account=alice :alice!u@h PRIVMSG #chan :hello world";
+        let msg = IrcMessage::parse(raw).unwrap();
+        assert_eq!(msg.serialize(), raw);
+    }
+
+    #[test]
+    fn roundtrip_tags_no_prefix() {
+        let raw = "@tag=val PRIVMSG #chan :hello world";
+        let msg = IrcMessage::parse(raw).unwrap();
+        assert_eq!(msg.serialize(), raw);
+    }
+
+    #[test]
+    fn roundtrip_tags_bare_key() {
+        let raw = "@draft/typing PRIVMSG #chan :hello world";
+        let msg = IrcMessage::parse(raw).unwrap();
+        assert_eq!(msg.serialize(), raw);
+    }
+
+    #[test]
+    fn roundtrip_tags_escaped_values() {
+        // Values containing special chars survive a round-trip.
+        let raw = "@label=hello\\sworld;x=a\\:b PING token";
+        let msg = IrcMessage::parse(raw).unwrap();
+        assert_eq!(msg.serialize(), raw);
+    }
+
+    #[test]
+    fn with_tag_builder() {
+        let msg = IrcMessage::privmsg("#chan", "hi")
+            .with_tag("time", Some("2023"))
+            .with_tag("bare", None::<String>);
+        assert_eq!(
+            msg.tags,
+            vec![
+                ("time".to_string(), Some("2023".to_string())),
+                ("bare".to_string(), None),
+            ]
+        );
     }
 }

@@ -1,12 +1,10 @@
 //! User-level commands: QUIT, PING, WHO, WHOIS, AWAY, ISON.
 
-use std::sync::Arc;
-
 use airc_shared::reply::*;
 use airc_shared::{Command, IrcMessage};
 use tracing::debug;
 
-use crate::client::ClientId;
+use crate::client::{ClientId, cap};
 use crate::relay::RelayEvent;
 use crate::state::SharedState;
 
@@ -24,9 +22,8 @@ pub async fn handle_quit(state: &SharedState, client_id: ClientId, msg: &IrcMess
     let peers = state.peers_in_shared_channels(client_id).await;
     if let Some(ref client) = client {
         let quit_msg = IrcMessage::quit(Some(reason)).with_prefix(client.prefix());
-        let line: Arc<str> = quit_msg.serialize().into();
         for peer in &peers {
-            peer.send_line(&line);
+            peer.send_message_tagged(&quit_msg);
         }
 
         // Relay QUIT to remote nodes (they derive nick removal from this).
@@ -41,6 +38,7 @@ pub async fn handle_quit(state: &SharedState, client_id: ClientId, msg: &IrcMess
     // Send ERROR to the quitting client.
     if let Some(ref client) = client {
         let error_msg = IrcMessage {
+            tags: vec![],
             prefix: None,
             command: Command::Unknown("ERROR".to_string()),
             params: vec![format!(
@@ -83,12 +81,16 @@ pub async fn handle_who(state: &SharedState, client_id: ClientId, msg: &IrcMessa
         // Channel WHO — list all visible members.
         // Use channel_members_with_mode to get member handles and their mode
         // flags in one pass, avoiding a full Channel::clone().
+        let multi = client.info.has_cap(cap::MULTI_PREFIX);
         if let Some(members_with_mode) = state.channel_members_with_mode(mask).await {
             for (member, mode) in &members_with_mode {
                 // H = here, G = gone (away).
                 let away_flag = if member.info.away.is_some() { "G" } else { "H" };
                 // Membership prefix: @ for op, + for voiced.
-                let prefix = if mode.is_op() {
+                // With multi-prefix, use multi_prefix() to get all symbols.
+                let prefix = if multi {
+                    mode.multi_prefix()
+                } else if mode.is_op() {
                     "@"
                 } else if mode.is_voice() {
                     "+"
@@ -195,8 +197,8 @@ pub async fn handle_whois(state: &SharedState, client_id: ClientId, msg: &IrcMes
                 client.send_numeric(RPL_WHOISCHANNELS, &[&target.info.nick, &chan_list]);
             }
             // RPL_WHOISSPECIAL (320) — NickServ reputation if registered.
-            if let Some(svc) = state.services() {
-                if let Some(identity) = svc.nickserv.get_identity(&target.info.nick).await {
+            if let Some(svc) = state.services()
+                && let Some(identity) = svc.nickserv.get_identity(&target.info.nick).await {
                     client.send_numeric(
                         RPL_WHOISSPECIAL,
                         &[
@@ -205,7 +207,6 @@ pub async fn handle_whois(state: &SharedState, client_id: ClientId, msg: &IrcMes
                         ],
                     );
                 }
-            }
 
             // RPL_ENDOFWHOIS
             client.send_numeric(RPL_ENDOFWHOIS, &[&target.info.nick, "End of WHOIS list"]);
@@ -225,18 +226,41 @@ pub async fn handle_away(state: &SharedState, client_id: ClientId, msg: &IrcMess
         return;
     };
 
-    if let Some(away_text) = msg.params.first()
+    let new_away: Option<String> = if let Some(away_text) = msg.params.first()
         && !away_text.is_empty()
     {
-        // Set away.
-        state.set_away(client_id, Some(away_text.clone())).await;
+        Some(away_text.clone())
+    } else {
+        None
+    };
+
+    // Update away status in shared state.
+    state.set_away(client_id, new_away.clone()).await;
+
+    // Respond to the client.
+    if new_away.is_some() {
         client.send_numeric(RPL_NOWAWAY, &["You have been marked as being away"]);
-        return;
+    } else {
+        client.send_numeric(RPL_UNAWAY, &["You are no longer marked as being away"]);
     }
 
-    // Clear away (no params or empty param).
-    state.set_away(client_id, None).await;
-    client.send_numeric(RPL_UNAWAY, &["You are no longer marked as being away"]);
+    // Broadcast AWAY change to channel members with away-notify capability.
+    let away_notify_msg = IrcMessage {
+        tags: vec![],
+        prefix: Some(client.prefix()),
+        command: Command::Away,
+        params: match &new_away {
+            Some(msg) => vec![msg.clone()],
+            None => vec![],
+        },
+    };
+
+    let peers = state.peers_in_shared_channels(client_id).await;
+    for peer in &peers {
+        if peer.info.has_cap(cap::AWAY_NOTIFY) {
+            peer.send_message_tagged(&away_notify_msg);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -57,6 +57,18 @@ export type IrcEvent =
   | { type: "reconnected" }
   | { type: "motd"; line: string }
   | { type: "motd_end" }
+  | { type: "sasl_logged_in"; account: string }
+  | { type: "sasl_failed"; code: number; reason: string }
+  /**
+   * A user in a shared channel set or cleared their away status (away-notify).
+   * `message` is `undefined` when the user returned from away.
+   */
+  | { type: "away"; nick: string; message: string | undefined }
+  /**
+   * A user's NickServ account changed while already connected (account-notify).
+   * `account` is `undefined` when the user logged out (`ACCOUNT *`).
+   */
+  | { type: "account_notify"; nick: string; account: string | undefined }
   | { type: "raw"; line: string };
 
 // ---------------------------------------------------------------------------
@@ -77,4 +89,28 @@ export function newChannelMessage(
     kind,
     timestamp: Math.floor(Date.now() / 1000),
   };
+}
+
+/**
+ * Create a new `ChannelMessage` using a server-supplied timestamp when
+ * available, falling back to the current system time.
+ *
+ * `serverTs` should be an ISO 8601 string from the `@time=` tag, or
+ * `null`/`undefined` if no tag was present.
+ */
+export function newChannelMessageWithTs(
+  target: string,
+  from: string,
+  text: string,
+  kind: MessageKind,
+  serverTs: string | null | undefined,
+): ChannelMessage {
+  let timestamp = Math.floor(Date.now() / 1000);
+  if (serverTs) {
+    const parsed = Date.parse(serverTs);
+    if (!isNaN(parsed)) {
+      timestamp = Math.floor(parsed / 1000);
+    }
+  }
+  return { target, from, text, kind, timestamp };
 }

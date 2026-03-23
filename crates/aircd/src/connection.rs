@@ -20,7 +20,7 @@ use tracing::{debug, info, warn};
 use airc_shared::reply::*;
 use airc_shared::{Command, IrcMessage};
 
-use crate::client::{ClientHandle, ClientId};
+use crate::client::{ClientHandle, ClientId, cap};
 use crate::handler;
 use crate::relay::RelayEvent;
 use crate::sasl::{self, SaslError, SaslStep};
@@ -184,7 +184,7 @@ impl Connection {
     /// - `CAP REQ :sasl`→ reply `CAP * ACK :sasl`
     /// - `CAP REQ ...`  → reply `CAP * NAK :...` (reject unknown caps)
     /// - `CAP END`      → clear `cap_negotiating`; complete registration if
-    ///                    NICK+USER already received
+    ///   NICK+USER already received
     ///
     /// SASL flow:
     /// - `AUTHENTICATE <MECH>` → start SASL session; send `AUTHENTICATE +`
@@ -203,6 +203,7 @@ impl Connection {
         let mut pending_nick: Option<String> = None;
         let mut pending_user: Option<(String, String)> = None; // (username, realname)
         let mut cap_negotiating = false;
+        let mut pending_caps: u32 = 0;
         let mut sasl_session: Option<sasl::SaslSession> = None;
         let mut authenticated_account: Option<String> = None;
         let mut line_buf = String::new();
@@ -242,17 +243,37 @@ impl Connection {
                     let subcommand = msg.params.first().map(|s| s.to_ascii_uppercase());
                     match subcommand.as_deref() {
                         Some("LS") => {
-                            // Begin CAP negotiation; advertise SASL.
+                            // Begin CAP negotiation; advertise SASL and all supported caps.
                             cap_negotiating = true;
                             let nick = pending_nick.as_deref().unwrap_or("*");
-                            let reply =
-                                format!(":{} CAP {} LS :sasl", self.state.server_name(), nick);
+                            let other_caps = cap::supported_caps().join(" ");
+                            let reply = format!(
+                                ":{} CAP {} LS :sasl={} {}",
+                                self.state.server_name(),
+                                nick,
+                                crate::sasl::SUPPORTED_MECHANISMS,
+                                other_caps,
+                            );
                             send_raw(reply).await;
                         }
                         Some("LIST") => {
                             let nick = pending_nick.as_deref().unwrap_or("*");
-                            let reply =
-                                format!(":{} CAP {} LIST :", self.state.server_name(), nick);
+                            // Build the active caps list from the pending bitmask.
+                            let active: Vec<&str> = cap::supported_caps()
+                                .iter()
+                                .copied()
+                                .filter(|&name| {
+                                    cap::name_to_bit(name)
+                                        .is_some_and(|bit| pending_caps & bit != 0)
+                                })
+                                .collect();
+                            let list_str = active.join(" ");
+                            let reply = format!(
+                                ":{} CAP {} LIST :{}",
+                                self.state.server_name(),
+                                nick,
+                                list_str,
+                            );
                             send_raw(reply).await;
                         }
                         Some("REQ") => {
@@ -261,14 +282,40 @@ impl Connection {
                             // Strip leading ':' if present (some clients include it).
                             let caps = caps_raw.trim_start_matches(':');
 
-                            // We only support "sasl"; NAK anything else.
-                            if !caps.is_empty()
-                                && caps
-                                    .split_whitespace()
-                                    .all(|c| c.eq_ignore_ascii_case("sasl"))
-                            {
-                                let reply =
-                                    format!(":{} CAP {} ACK :sasl", self.state.server_name(), nick);
+                            // Split the requested caps; each must be supported (or prefixed
+                            // with `-` for disable). We accept "sasl" and any cap in
+                            // cap::supported_caps().
+                            let all_ok = !caps.is_empty()
+                                && caps.split_whitespace().all(|c| {
+                                    let name = c.strip_prefix('-').unwrap_or(c);
+                                    name.eq_ignore_ascii_case("sasl")
+                                        || cap::name_to_bit(&name.to_ascii_lowercase()).is_some()
+                                });
+
+                            if all_ok {
+                                // Apply enable/disable to pending_caps.
+                                for token in caps.split_whitespace() {
+                                    if let Some(name) = token.strip_prefix('-') {
+                                        if let Some(bit) =
+                                            cap::name_to_bit(&name.to_ascii_lowercase())
+                                        {
+                                            pending_caps &= !bit;
+                                        }
+                                    } else {
+                                        if let Some(bit) =
+                                            cap::name_to_bit(&token.to_ascii_lowercase())
+                                        {
+                                            pending_caps |= bit;
+                                        }
+                                        // "sasl" has no bit in cap module — just ACK it.
+                                    }
+                                }
+                                let reply = format!(
+                                    ":{} CAP {} ACK :{}",
+                                    self.state.server_name(),
+                                    nick,
+                                    caps
+                                );
                                 send_raw(reply).await;
                             } else {
                                 let reply = format!(
@@ -303,16 +350,24 @@ impl Connection {
                         // via spawn_blocking further down.
                         let ns_opt = self.state.services().map(|s| s.nickserv.clone());
                         let lookup: sasl::PasswordLookup = Box::new(move |nick: &str| {
-                            let Some(ref ns) = ns_opt else {
-                                return None;
-                            };
+                            let ns = ns_opt.as_ref()?;
                             let nick_lower = nick.to_ascii_lowercase();
                             let ids = ns.identities.read().unwrap();
                             let identity = ids.get(&nick_lower)?;
-                            let password_sha256 = identity.password_hash.clone()?;
+                            // All five SCRAM fields must be present; accounts registered
+                            // via keypair only have no password credentials.
+                            let scram_stored_key = identity.scram_stored_key.clone()?;
+                            let scram_server_key = identity.scram_server_key.clone()?;
+                            let scram_salt = identity.scram_salt.clone()?;
+                            let scram_iterations = identity.scram_iterations?;
+                            let bcrypt_hash = identity.bcrypt_hash.clone()?;
                             Some(sasl::PasswordRecord {
                                 account: nick.to_string(),
-                                password_sha256,
+                                scram_stored_key,
+                                scram_server_key,
+                                scram_salt,
+                                scram_iterations,
+                                bcrypt_hash,
                             })
                         });
 
@@ -486,6 +541,7 @@ impl Connection {
                         tx.clone(),
                         cancel.clone(),
                         authenticated_account.clone(),
+                        pending_caps,
                     )
                     .await
                 {
@@ -632,9 +688,8 @@ async fn handle_unexpected_disconnect(state: &SharedState, client_id: ClientId) 
     let peers = state.peers_in_shared_channels(client_id).await;
     if let Some(ref client) = client {
         let quit_msg = IrcMessage::quit(Some("Connection closed")).with_prefix(client.prefix());
-        let line: Arc<str> = quit_msg.serialize().into();
         for peer in &peers {
-            peer.send_line(&line);
+            peer.send_message_tagged(&quit_msg);
         }
 
         // Relay QUIT to remote nodes.

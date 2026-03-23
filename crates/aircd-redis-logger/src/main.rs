@@ -30,11 +30,7 @@ use prost::Message as ProstMessage;
 use tracing::{error, info, warn};
 
 use airc_shared::log::FileLogger;
-use airc_shared::relay::{
-    RelayEnvelope,
-    RelayEvent,
-    RELAY_CHANNEL,
-};
+use airc_shared::relay::{RELAY_CHANNEL, RelayEnvelope, RelayEvent};
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -138,9 +134,9 @@ async fn main() {
         };
 
         // Ensure a FileLogger exists for this origin node.
-        let logger = loggers.entry(origin.clone()).or_insert_with(|| {
-            FileLogger::new(Some(log_dir.clone()), origin.clone())
-        });
+        let logger = loggers
+            .entry(origin.clone())
+            .or_insert_with(|| FileLogger::new(Some(log_dir.clone()), origin.clone()));
 
         match event {
             // -----------------------------------------------------------------
@@ -169,10 +165,7 @@ async fn main() {
             // Nick change
             // -----------------------------------------------------------------
             RelayEvent::NickChange(e) => {
-                let line = format!(
-                    "NICK client_id={} -> {}",
-                    e.client_id, e.new_nick
-                );
+                let line = format!("NICK client_id={} -> {}", e.client_id, e.new_nick);
                 info!("{line}");
                 logger.log_nick_change("*", &e.client_id, &e.new_nick);
             }
@@ -225,10 +218,7 @@ async fn main() {
                     Some(Target::TargetClientId(id)) => format!("@{id}"),
                     None => String::from("<unknown>"),
                 };
-                let line = format!(
-                    "NOTICE client_id={} -> {}: {}",
-                    e.client_id, target, e.text
-                );
+                let line = format!("NOTICE client_id={} -> {}: {}", e.client_id, target, e.text);
                 info!("{line}");
                 if target.starts_with('#') || target.starts_with('&') {
                     logger.log_notice(&target, &e.client_id, &e.text);
@@ -254,10 +244,7 @@ async fn main() {
                 info!("{line}");
             }
             RelayEvent::Kick(e) => {
-                let content = format!(
-                    "by {} reason={}",
-                    e.client_id, e.reason
-                );
+                let content = format!("by {} reason={}", e.client_id, e.reason);
                 let line = format!(
                     "KICK client_id={} channel={} target={} reason={}",
                     e.client_id, e.channel, e.target_client_id, e.reason

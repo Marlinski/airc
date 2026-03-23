@@ -38,6 +38,8 @@ hmac.workspace = true
 pbkdf2.workspace = true
 tokio-util.workspace = true
 dashmap.workspace = true
+bcrypt.workspace = true
+chrono.workspace = true
 hex = "0.4"
 subtle = "2"
 

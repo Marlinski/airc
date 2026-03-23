@@ -14,18 +14,17 @@
 //! C: NICK <nick>
 //! C: USER <user> 0 * :<realname>
 //!
-//! S: CAP * LS :sasl multi-prefix ...   ← server capabilities
+//! S: CAP * LS :sasl=SCRAM-SHA-256,PLAIN multi-prefix ...  ← server capabilities
 //!
-//! If sasl is in the cap list and SaslConfig is set:
+//! If sasl is advertised and password is set:
 //!   C: CAP REQ :sasl
 //!   S: CAP * ACK :sasl
-//!   C: AUTHENTICATE <MECHANISM>
-//!   S: AUTHENTICATE +               ← empty challenge (PLAIN)
-//!   C: AUTHENTICATE <base64-payload>
+//!   C: AUTHENTICATE SCRAM-SHA-256    (or PLAIN)
+//!   ...SCRAM or PLAIN exchange...
 //!   S: 900 ...                       ← RPL_LOGGEDIN
 //!   S: 903 ...                       ← RPL_SASLSUCCESS
-//! Else:
-//!   (no sasl negotiation)
+//! Else if sasl not advertised and password is set:
+//!   (after 001) C: PRIVMSG NickServ :IDENTIFY <password>
 //!
 //! C: CAP END
 //! S: 001 ...                         ← RPL_WELCOME (registration complete)
@@ -33,11 +32,12 @@
 //!
 //! Protocol logic lives in `handler/`; this module is pure transport.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio_rustls::TlsConnector;
 use tracing::{debug, error, info, warn};
 
@@ -46,7 +46,7 @@ use airc_shared::IrcMessage;
 use crate::config::{ClientConfig, TlsMode};
 use crate::error::ClientError;
 use crate::event::IrcEvent;
-use crate::handler::cap::SaslHandshake;
+use crate::handler::cap::{SaslHandshake, SaslMechanism, SaslStep};
 use crate::handler::{ConnContext, handle_message};
 use crate::state::ClientState;
 
@@ -136,13 +136,21 @@ pub async fn connect(
     // Channel for parsed events: reader task -> caller.
     let (event_tx, event_rx) = mpsc::channel::<IrcEvent>(512);
 
-    // Shared SASL handshake state — only populated when sasl is configured.
+    // Shared SASL handshake state — populated when a password is configured.
+    // The mechanism is a placeholder (Plain) that will be overridden in
+    // handle_cap LS once the server advertises its supported mechanisms.
     let sasl_state: Arc<Mutex<Option<SaslHandshake>>> =
-        Arc::new(Mutex::new(config.sasl.as_ref().map(|s| SaslHandshake {
-            account: s.account.clone(),
-            password: s.password.clone(),
-            mechanism: s.mechanism,
-            step: crate::handler::cap::SaslStep::AwaitingCapAck,
+        Arc::new(Mutex::new(config.password.as_ref().map(|pw| {
+            SaslHandshake {
+                nick: config.nick.clone(),
+                password: pw.clone(),
+                mechanism: SaslMechanism::Plain, // placeholder; resolved in CAP LS
+                step: SaslStep::AwaitingCapAck,
+                client_nonce: String::new(),
+                client_first_bare: String::new(),
+                auth_message: String::new(),
+                expected_server_sig: Vec::new(),
+            }
         })));
 
     match config.tls {
@@ -157,6 +165,7 @@ pub async fn connect(
                 event_tx,
                 state.clone(),
                 sasl_state,
+                config.password.clone(),
             );
         }
         TlsMode::Preferred => match establish_tls(&config.server_addr).await {
@@ -170,6 +179,7 @@ pub async fn connect(
                     event_tx,
                     state.clone(),
                     sasl_state,
+                    config.password.clone(),
                 );
             }
             Err(tls_err) => {
@@ -186,6 +196,7 @@ pub async fn connect(
                     event_tx,
                     state.clone(),
                     sasl_state,
+                    config.password.clone(),
                 );
             }
         },
@@ -201,6 +212,7 @@ pub async fn connect(
                 event_tx,
                 state.clone(),
                 sasl_state,
+                config.password.clone(),
             );
         }
     }
@@ -210,11 +222,11 @@ pub async fn connect(
     // Always start with CAP LS 302 so the server knows we speak IRCv3.
     // NICK and USER follow immediately — the server buffers them until
     // CAP END completes registration.
+    //
+    // NOTE: We do NOT send PASS here. PASS is for server connection
+    // passwords (bounce/services), not user authentication.  Authentication
+    // is handled by SASL (above) or NickServ IDENTIFY (after RPL_WELCOME).
     let _ = line_tx.send("CAP LS 302".to_string()).await;
-
-    if let Some(ref pass) = config.password {
-        let _ = line_tx.send(IrcMessage::pass(pass).serialize()).await;
-    }
     let _ = line_tx
         .send(IrcMessage::nick(&config.nick).serialize())
         .await;
@@ -229,6 +241,7 @@ pub async fn connect(
 // I/O task spawning
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_io_tasks<R, W>(
     reader: R,
     writer: W,
@@ -237,12 +250,22 @@ fn spawn_io_tasks<R, W>(
     event_tx: mpsc::Sender<IrcEvent>,
     state: ClientState,
     sasl_state: Arc<Mutex<Option<SaslHandshake>>>,
+    password: Option<String>,
 ) where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
+    let negotiated_caps = Arc::new(RwLock::new(HashSet::new()));
     tokio::spawn(write_loop(writer, line_rx));
-    tokio::spawn(read_loop(reader, line_tx, event_tx, state, sasl_state));
+    tokio::spawn(read_loop(
+        reader,
+        line_tx,
+        event_tx,
+        state,
+        sasl_state,
+        password,
+        negotiated_caps,
+    ));
 }
 
 /// Writer task: drains the line channel and writes to the stream.
@@ -266,6 +289,8 @@ async fn read_loop<R: AsyncRead + Unpin>(
     event_tx: mpsc::Sender<IrcEvent>,
     state: ClientState,
     sasl_state: Arc<Mutex<Option<SaslHandshake>>>,
+    password: Option<String>,
+    negotiated_caps: Arc<RwLock<HashSet<String>>>,
 ) {
     let mut buf_reader = BufReader::new(reader);
     let mut line_buf = String::new();
@@ -275,6 +300,8 @@ async fn read_loop<R: AsyncRead + Unpin>(
         event_tx: event_tx.clone(),
         state,
         sasl_state,
+        password,
+        negotiated_caps,
     };
 
     loop {

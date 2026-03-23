@@ -1,6 +1,7 @@
 //! Channel membership and nick-change handlers.
 //!
-//! Covers: JOIN, PART, QUIT, KICK, NICK, TOPIC.
+//! Covers: JOIN, PART, QUIT, KICK, NICK, TOPIC, AWAY (away-notify),
+//! ACCOUNT (account-notify).
 
 use airc_shared::IrcMessage;
 
@@ -9,6 +10,10 @@ use crate::event::IrcEvent;
 use super::{ConnContext, extract_nick};
 
 /// Handle a JOIN message.
+///
+/// Gracefully handles the extended-join format (IRCv3 extended-join cap):
+/// `:nick!user@host JOIN #chan account :Real Name`
+/// Standard JOIN has only `[0]=#chan`; extended adds `[1]=account` and `[2]=realname`.
 pub async fn handle_join(msg: &IrcMessage, ctx: &ConnContext) {
     let channel = msg.params.first().cloned().unwrap_or_default();
     let nick = extract_nick(&msg.prefix);
@@ -107,5 +112,33 @@ pub async fn handle_topic(msg: &IrcMessage, ctx: &ConnContext) {
             topic,
             set_by,
         })
+        .await;
+}
+
+/// Handle an AWAY broadcast (IRCv3 away-notify).
+///
+/// `:nick!user@host AWAY [:reason]`
+///
+/// `message == None` means the user returned from away; `Some(text)` means
+/// they set an away reason.
+pub async fn handle_away(msg: &IrcMessage, ctx: &ConnContext) {
+    let nick = extract_nick(&msg.prefix);
+    // params[0] is the optional away message; absent means "back".
+    let message = msg.params.first().cloned();
+    let _ = ctx.event_tx.send(IrcEvent::Away { nick, message }).await;
+}
+
+/// Handle an ACCOUNT notification (IRCv3 account-notify).
+///
+/// `:nick!user@host ACCOUNT <account|*>`
+///
+/// `"*"` means the user logged out; any other value is the new account name.
+pub async fn handle_account(msg: &IrcMessage, ctx: &ConnContext) {
+    let nick = extract_nick(&msg.prefix);
+    let raw = msg.params.first().cloned().unwrap_or_default();
+    let account = if raw == "*" { None } else { Some(raw) };
+    let _ = ctx
+        .event_tx
+        .send(IrcEvent::AccountNotify { nick, account })
         .await;
 }

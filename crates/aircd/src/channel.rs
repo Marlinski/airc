@@ -45,7 +45,11 @@ impl ChannelModes {
         if self.limit.is_some() {
             s.push('l');
         }
-        if s.len() == 1 { "+".to_string() } else { s }
+        if s.len() == 1 {
+            "+".to_string()
+        } else {
+            s
+        }
     }
 }
 
@@ -74,6 +78,17 @@ impl MemberMode {
         }
     }
 
+    /// All IRC prefix characters for multi-prefix support.
+    ///
+    /// With the current single-level model this is the same as `prefix()`,
+    /// but the method name makes the intent clear at call sites.
+    pub fn multi_prefix(self) -> &'static str {
+        // With a single-level privilege model the multi-prefix string is
+        // identical to the single prefix.  If a dual Op+Voice mode is ever
+        // added this method should return "@+" for that case.
+        self.prefix()
+    }
+
     pub fn is_op(self) -> bool {
         self == MemberMode::Op
     }
@@ -91,6 +106,7 @@ impl MemberMode {
 pub struct Membership {
     pub client_id: ClientId,
     pub mode: MemberMode,
+    #[allow(dead_code)]
     pub joined_at: u64,
 }
 
@@ -135,10 +151,12 @@ pub struct Channel {
 /// `*_voiced_id` helpers that acquire the channel lock only for that lookup.
 #[derive(Debug, Clone)]
 pub struct ChannelView {
+    #[allow(dead_code)]
     pub name: String,
     pub topic: Option<(String, String, u64)>,
     pub modes: ChannelModes,
     pub invited: HashSet<ClientId>,
+    #[allow(dead_code)]
     pub created_at: u64,
     pub member_count: usize,
 }

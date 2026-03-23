@@ -53,6 +53,10 @@ enum Commands {
         #[arg(long, conflicts_with = "tls")]
         no_tls: bool,
 
+        /// Password for NickServ/SASL authentication.
+        #[arg(long, short = 'p')]
+        password: Option<String>,
+
         /// Run in foreground (don't daemonize).
         #[arg(long, default_value_t = false)]
         foreground: bool,
@@ -163,6 +167,32 @@ enum Commands {
         json: bool,
     },
 
+    /// Register a new nickname with NickServ.
+    ///
+    /// Connects to the server, sends `PRIVMSG NickServ :REGISTER <password>`,
+    /// waits for a NickServ NOTICE confirming success or failure, then exits.
+    /// No daemon is started.
+    Register {
+        /// Server address (host:port).
+        #[arg(default_value = DEFAULT_SERVER)]
+        server: String,
+
+        /// Nickname to register.
+        #[arg(short, long, default_value = DEFAULT_NICK)]
+        nick: String,
+
+        /// Password for the new NickServ account.
+        password: String,
+
+        /// Require TLS (fail if TLS handshake fails).
+        #[arg(long, conflicts_with = "no_tls")]
+        tls: bool,
+
+        /// Disable TLS (plain TCP only).
+        #[arg(long, conflicts_with = "tls")]
+        no_tls: bool,
+    },
+
     /// Start the MCP server (stdio transport).
     ///
     /// Runs an MCP server over stdin/stdout for use with AI agent hosts
@@ -194,6 +224,7 @@ async fn main() {
             join,
             tls,
             no_tls,
+            password,
             foreground,
         } => {
             let auto_join: Vec<String> = join
@@ -241,6 +272,7 @@ async fn main() {
                 nick,
                 auto_join,
                 tls_mode,
+                password,
                 foreground,
             )
             .await
@@ -419,6 +451,26 @@ async fn main() {
             }
         }
 
+        Commands::Register {
+            server,
+            nick,
+            password,
+            tls,
+            no_tls,
+        } => {
+            let tls_mode = if tls {
+                TlsMode::Required
+            } else if no_tls {
+                TlsMode::Disabled
+            } else {
+                TlsMode::Preferred
+            };
+            if let Err(e) = cmd_register(server, nick, password, tls_mode).await {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
+
         Commands::Mcp => {
             // The MCP server uses stdio for JSON-RPC, so tracing must go
             // to stderr. Set it up here before handing off.
@@ -553,5 +605,63 @@ fn chrono_format(ts: u64) -> String {
         format!("{}h ago", elapsed / 3600)
     } else {
         format!("{}d ago", elapsed / 86400)
+    }
+}
+
+/// One-shot NickServ REGISTER command.
+///
+/// Connects to `server` as `nick` (no password), waits for RPL_WELCOME,
+/// sends `PRIVMSG NickServ :REGISTER <password>`, then waits up to 10 s
+/// for a NOTICE from NickServ.  Prints the NOTICE text and returns.
+async fn cmd_register(
+    server: String,
+    nick: String,
+    password: String,
+    tls_mode: TlsMode,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use airc_client::{ClientConfig, IrcClient, IrcEvent};
+    use tokio::time::{Duration, timeout};
+
+    let config = ClientConfig::new(&server, &nick).with_tls(tls_mode);
+
+    let (client, _motd, mut event_rx) = IrcClient::connect(config).await?;
+
+    // Send the REGISTER command.
+    client
+        .say("NickServ", &format!("REGISTER {password}"))
+        .await?;
+
+    // Wait up to 10 s for a NOTICE from NickServ.
+    let notice_timeout = Duration::from_secs(10);
+    let result = timeout(notice_timeout, async {
+        loop {
+            match event_rx.recv().await {
+                Some(IrcEvent::Notice { from, text, .. }) => {
+                    let sender = from.as_deref().unwrap_or("");
+                    // NickServ may appear as "NickServ" or "NickServ!NickServ@services"
+                    if sender.eq_ignore_ascii_case("NickServ") || sender.starts_with("NickServ!") {
+                        return Some(text);
+                    }
+                }
+                Some(IrcEvent::Disconnected { reason }) => {
+                    return Some(format!("disconnected: {reason}"));
+                }
+                None => return None,
+                _ => {}
+            }
+        }
+    })
+    .await;
+
+    // Quit cleanly regardless of outcome.
+    let _ = client.quit(None).await;
+
+    match result {
+        Ok(Some(text)) => {
+            println!("{text}");
+            Ok(())
+        }
+        Ok(None) => Err("connection closed before NickServ responded".into()),
+        Err(_) => Err("timed out waiting for NickServ response".into()),
     }
 }

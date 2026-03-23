@@ -1,5 +1,5 @@
 {
-  "name": "@airc/client",
+  "name": "@marlinski/airc-client",
   "version": "0.1.0",
   "description": "TypeScript IRC client for AIRC — connects to aircd over WebSocket",
   "type": "module",

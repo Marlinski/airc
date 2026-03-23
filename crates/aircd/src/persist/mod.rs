@@ -350,7 +350,16 @@ struct Inner {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NickRecord {
     pub nick: String,
-    pub password_hash: Option<String>,
+    /// StoredKey for SCRAM-SHA-256, hex-encoded.
+    pub scram_stored_key: Option<String>,
+    /// ServerKey for SCRAM-SHA-256, hex-encoded.
+    pub scram_server_key: Option<String>,
+    /// Random 16-byte PBKDF2 salt, hex-encoded.
+    pub scram_salt: Option<String>,
+    /// PBKDF2 iteration count used during registration.
+    pub scram_iterations: Option<u32>,
+    /// bcrypt hash of the password (for PLAIN auth).
+    pub bcrypt_hash: Option<String>,
     pub pubkey_hex: Option<String>,
     pub registered_at: u64,
     pub reputation: i64,
@@ -376,11 +385,10 @@ impl PersistentState {
     /// all state into memory, and return a ready `PersistentState`.
     pub async fn open(db_path: &Path, node_id: impl Into<NodeId>) -> Result<Self, sqlx::Error> {
         // Ensure parent directory exists.
-        if let Some(parent) = db_path.parent() {
-            if !parent.as_os_str().is_empty() {
+        if let Some(parent) = db_path.parent()
+            && !parent.as_os_str().is_empty() {
                 tokio::fs::create_dir_all(parent).await.ok();
             }
-        }
 
         let url = format!(
             "sqlite://{}?mode=rwc",
@@ -632,11 +640,10 @@ impl PersistentState {
     /// intentional: gossip is best-effort, and nodes recover stale state via
     /// anti-entropy on reconnect.  Drops are logged at WARN level.
     async fn gossip(&self, crdt_id: &str, blob: Vec<u8>) {
-        if let Some(tx) = self.inner.gossip_tx.get() {
-            if let Err(e) = tx.try_send((crdt_id.to_string(), blob)) {
+        if let Some(tx) = self.inner.gossip_tx.get()
+            && let Err(e) = tx.try_send((crdt_id.to_string(), blob)) {
                 warn!(crdt_id = %crdt_id, error = %e, "gossip: channel full, dropping CRDT delta (anti-entropy will recover)");
             }
-        }
     }
 
     /// Internal helper: enqueue a write operation for the background write task.
@@ -935,6 +942,7 @@ impl PersistentState {
         bincode::serde::encode_to_vec(orswot, bincode::config::standard()).ok()
     }
 
+    #[allow(dead_code)]
     fn persist_ban_list(&self, channel_lower: &str, orswot: &Orswot<BanMask, NodeId>) {
         match bincode::serde::encode_to_vec(orswot, bincode::config::standard()) {
             Ok(blob) => self.enqueue_write(WriteOp::BanList {
@@ -1848,7 +1856,11 @@ mod tests {
 
         ps.upsert_nick(NickRecord {
             nick: "Alice".to_string(),
-            password_hash: Some("hash".to_string()),
+            scram_stored_key: Some("aabbcc".repeat(8).chars().take(64).collect()),
+            scram_server_key: Some("ddeeff".repeat(8).chars().take(64).collect()),
+            scram_salt: Some("deadbeef".repeat(4)),
+            scram_iterations: Some(600_000),
+            bcrypt_hash: Some("$2b$12$fakehashfortesting".to_string()),
             pubkey_hex: None,
             registered_at: 1000,
             reputation: 5,

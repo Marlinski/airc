@@ -217,7 +217,11 @@ async fn anti_entropy_syncs_nick_from_populated_node_to_empty_node() {
     // Pre-populate node A with a nick registration.
     ps_a.upsert_nick(crate::persist::NickRecord {
         nick: "alice".to_string(),
-        password_hash: Some("$argon2id$v=19$fake".to_string()),
+        scram_stored_key: Some("aabbcc".repeat(8).chars().take(64).collect()),
+        scram_server_key: Some("ddeeff".repeat(8).chars().take(64).collect()),
+        scram_salt: Some("deadbeef".repeat(4)),
+        scram_iterations: Some(600_000),
+        bcrypt_hash: Some("$2b$12$fakehashfortesting".to_string()),
         pubkey_hex: None,
         registered_at: 1_700_000_000,
         reputation: 0,

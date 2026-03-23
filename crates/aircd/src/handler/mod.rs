@@ -21,7 +21,7 @@ pub mod user;
 use airc_shared::reply::*;
 use airc_shared::{Command, IrcMessage};
 
-use crate::client::{ClientHandle, ClientId};
+use crate::client::{ClientHandle, ClientId, cap};
 use crate::state::SharedState;
 
 // Re-export the public API used by connection.rs / server.rs.
@@ -105,12 +105,20 @@ pub(super) fn send_topic_to_client(
 }
 
 /// Send the NAMES list for a channel to a single client.
+///
+/// If the client has the `multi-prefix` capability, all membership prefix
+/// characters are included (e.g. `@+nick`); otherwise only the highest
+/// privilege prefix is shown.
 pub(super) async fn send_names_to_client(
     state: &SharedState,
     client: &ClientHandle,
     channel_name: &str,
 ) {
-    if let Some(nicks) = state.channel_nicks_with_prefix(channel_name).await {
+    let multi = client.info.has_cap(cap::MULTI_PREFIX);
+    if let Some(nicks) = state
+        .channel_nicks_with_prefix_multi(channel_name, multi)
+        .await
+    {
         let names_str = nicks.join(" ");
         // Channel type: @ for secret, = for public.
         let chan_type = if state.channel_is_secret(channel_name).await {

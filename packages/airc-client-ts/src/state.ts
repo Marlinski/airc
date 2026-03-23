@@ -100,6 +100,11 @@ export class ClientState {
     return Array.from(this._channels.values()).map((c) => c.name);
   }
 
+  /** Get the member list for a channel, or an empty array if not joined. */
+  members(channel: string): string[] {
+    return this._channels.get(channel.toLowerCase())?.members ?? [];
+  }
+
   /** Set the topic for a channel. */
   setTopic(channel: string, topic: string): void {
     const ch = this._channels.get(channel.toLowerCase());

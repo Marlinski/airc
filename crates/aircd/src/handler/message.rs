@@ -1,11 +1,9 @@
 //! PRIVMSG and NOTICE — message routing (channel fan-out and DMs).
 
-use std::sync::Arc;
-
 use airc_shared::reply::*;
 use airc_shared::{Command, IrcMessage};
 
-use crate::client::ClientId;
+use crate::client::{ClientId, cap};
 use crate::relay::RelayEvent;
 use crate::state::{ChannelSendResult, SharedState};
 
@@ -60,9 +58,14 @@ async fn route_message(state: &SharedState, client_id: ClientId, msg: &IrcMessag
                 }
             }
             ChannelSendResult::Ok(members) => {
-                let line: Arc<str> = outgoing.serialize().into();
                 for member in &members {
-                    member.send_line(&line);
+                    member.send_message_tagged(&outgoing);
+                }
+                // Echo back to sender if they have echo-message cap.
+                // (Channel fan-out excludes the sender per IRC convention, so
+                // we always send it here when the cap is active.)
+                if client.info.has_cap(cap::ECHO_MESSAGE) {
+                    client.send_message_tagged(&outgoing);
                 }
                 // Relay to remote nodes.
                 if cmd == Command::Notice {
@@ -119,13 +122,19 @@ async fn route_message(state: &SharedState, client_id: ClientId, msg: &IrcMessag
         // Look up target (local or remote) and route accordingly.
         match state.find_user_by_nick(target).await {
             Some(target_client) if target_client.is_local() => {
-                target_client.send_message(&outgoing);
+                target_client.send_message_tagged(&outgoing);
 
                 // RPL_AWAY to sender if target is away.
                 if cmd == Command::Privmsg
                     && let Some(ref away_msg) = target_client.info.away
                 {
                     client.send_numeric(RPL_AWAY, &[&target_client.info.nick, away_msg]);
+                }
+
+                // Echo back to sender if they have echo-message cap and are
+                // distinct from the target (self-DM already delivered above).
+                if client.info.has_cap(cap::ECHO_MESSAGE) && client.id != target_client.id {
+                    client.send_message_tagged(&outgoing);
                 }
             }
             Some(_remote_client) => {

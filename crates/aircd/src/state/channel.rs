@@ -31,11 +31,10 @@ impl SharedState {
             }
             let shard = self.inner.users[i].read().await;
             for id in shard_ids {
-                if let Some(c) = shard.get(id) {
-                    if c.is_local() {
+                if let Some(c) = shard.get(id)
+                    && c.is_local() {
                         handles.push(c.clone());
                     }
-                }
             }
         }
         handles
@@ -123,11 +122,10 @@ impl SharedState {
 
         if is_empty {
             let mut map = self.inner.channels.write().await;
-            if let Some(arc) = map.get(&key) {
-                if arc.read().await.members.is_empty() {
+            if let Some(arc) = map.get(&key)
+                && arc.read().await.members.is_empty() {
                     map.remove(&key);
                 }
-            }
             return Some(vec![]);
         }
 
@@ -176,11 +174,10 @@ impl SharedState {
         if !empty_keys.is_empty() {
             let mut map = self.inner.channels.write().await;
             for key in &empty_keys {
-                if let Some(arc) = map.get(key) {
-                    if arc.read().await.members.is_empty() {
+                if let Some(arc) = map.get(key)
+                    && arc.read().await.members.is_empty() {
                         map.remove(key);
                     }
-                }
             }
         }
 
@@ -320,7 +317,59 @@ impl SharedState {
         Some(result)
     }
 
+    /// Get channel member nicks with operator prefix (`@`), respecting
+    /// the `multi_prefix` flag.  When `multi_prefix` is `true`, all applicable
+    /// prefix characters are concatenated in highest-to-lowest order (e.g.
+    /// `@+nick` for an op who is also voiced); when `false`, only the highest
+    /// privilege prefix is used (current behaviour).
+    pub async fn channel_nicks_with_prefix_multi(
+        &self,
+        channel_name: &str,
+        multi_prefix: bool,
+    ) -> Option<Vec<String>> {
+        let key = channel_name.to_ascii_lowercase();
+        let arc = self.inner.channels.read().await.get(&key)?.clone();
+
+        // Collect (client_id, mode_prefix) while holding only the channel lock.
+        let members: Vec<(ClientId, &'static str)> = {
+            let ch = arc.read().await;
+            ch.members
+                .values()
+                .map(|m| {
+                    let pfx = if multi_prefix {
+                        m.mode.multi_prefix()
+                    } else {
+                        m.mode.prefix()
+                    };
+                    (m.client_id, pfx)
+                })
+                .collect()
+        };
+
+        // Group by shard for efficient lookup.
+        let mut by_shard: [Vec<(ClientId, &'static str)>; NUM_SHARDS] =
+            std::array::from_fn(|_| Vec::new());
+        for (id, prefix) in &members {
+            by_shard[(id.0 % NUM_SHARDS as u64) as usize].push((*id, *prefix));
+        }
+
+        let mut nicks: Vec<String> = Vec::with_capacity(members.len());
+        for (i, entries) in by_shard.iter().enumerate() {
+            if entries.is_empty() {
+                continue;
+            }
+            let shard = self.inner.users[i].read().await;
+            for (id, prefix) in entries {
+                if let Some(c) = shard.get(id) {
+                    nicks.push(format!("{}{}", prefix, c.info.nick));
+                }
+            }
+        }
+        Some(nicks)
+    }
+
     /// Get channel member nicks with operator prefix (`@`).
+    #[allow(dead_code)]
     pub async fn channel_nicks_with_prefix(&self, channel_name: &str) -> Option<Vec<String>> {
         let key = channel_name.to_ascii_lowercase();
         let arc = self.inner.channels.read().await.get(&key)?.clone();
@@ -368,6 +417,7 @@ impl SharedState {
     }
 
     /// Get local channel member handles excluding a given client.
+    #[allow(dead_code)]
     pub async fn channel_members_except(
         &self,
         channel_name: &str,
@@ -521,11 +571,10 @@ impl SharedState {
 
         if is_empty {
             let mut map = self.inner.channels.write().await;
-            if let Some(a) = map.get(&key) {
-                if a.read().await.members.is_empty() {
+            if let Some(a) = map.get(&key)
+                && a.read().await.members.is_empty() {
                     map.remove(&key);
                 }
-            }
             return Some(vec![]);
         }
 
@@ -606,6 +655,7 @@ impl SharedState {
     }
 
     /// Check whether a nick can speak in a channel (+m enforcement).
+    #[allow(dead_code)]
     pub async fn can_speak_in_channel(&self, channel_name: &str, nick: &str) -> bool {
         // Resolve nick → ClientId before acquiring the channel lock.
         let id = match self.find_user_by_nick(nick).await {
@@ -625,6 +675,7 @@ impl SharedState {
     }
 
     /// Check whether a nick is a member of a channel.
+    #[allow(dead_code)]
     pub async fn is_channel_member(&self, channel_name: &str, nick: &str) -> bool {
         // Resolve nick first, then acquire channel lock (correct ordering).
         let id = match self.find_user_by_nick(nick).await {
@@ -640,6 +691,7 @@ impl SharedState {
     }
 
     /// Check whether a channel has +n (no external messages) mode set.
+    #[allow(dead_code)]
     pub async fn channel_is_no_external(&self, channel_name: &str) -> bool {
         let key = channel_name.to_ascii_lowercase();
         let arc = match self.inner.channels.read().await.get(&key).cloned() {
@@ -660,6 +712,7 @@ impl SharedState {
     }
 
     /// Get the count of active channels.
+    #[allow(dead_code)]
     pub async fn channel_count(&self) -> usize {
         self.inner.channels.read().await.len()
     }
@@ -745,6 +798,7 @@ impl SharedState {
 
     /// Return `(local_id_handles, channel_ids)` for all local members in the
     /// given set of `ClientId`s.  Used by the relay snapshot builder.
+    #[allow(dead_code)]
     pub async fn local_handles_for_ids_pub(&self, ids: &[ClientId]) -> Vec<ClientHandle> {
         self.local_handles_for_ids(ids).await
     }

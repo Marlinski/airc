@@ -1,7 +1,5 @@
 //! Server-level commands: MOTD, VERSION, LUSERS, OPER, KILL.
 
-use std::sync::Arc;
-
 use airc_shared::reply::*;
 use airc_shared::{Command, IrcMessage};
 use subtle::ConstantTimeEq;
@@ -76,7 +74,7 @@ pub async fn handle_oper(state: &SharedState, client_id: ClientId, msg: &airc_sh
             let mode_str = if is_service { "+oS" } else { "+o" };
             let mode_msg = IrcMessage::mode(&client.info.nick, Some(mode_str))
                 .with_prefix(state.server_name());
-            client.send_message(&mode_msg);
+            client.send_message_tagged(&mode_msg);
 
             debug!(
                 client_id = %client_id,
@@ -133,6 +131,7 @@ pub async fn handle_kill(state: &SharedState, client_id: ClientId, msg: &IrcMess
 
     // Send ERROR to the killed client.
     let error_msg = IrcMessage {
+        tags: vec![],
         prefix: None,
         command: Command::Unknown("ERROR".to_string()),
         params: vec![format!(
@@ -144,9 +143,8 @@ pub async fn handle_kill(state: &SharedState, client_id: ClientId, msg: &IrcMess
 
     // Send QUIT to all their channel peers.
     let quit_msg = IrcMessage::quit(Some(reason)).with_prefix(target_handle.prefix());
-    let line: Arc<str> = quit_msg.serialize().into();
     for peer in &peers {
-        peer.send_line(&line);
+        peer.send_message_tagged(&quit_msg);
     }
 
     debug!(

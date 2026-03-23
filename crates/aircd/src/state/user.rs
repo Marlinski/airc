@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 use airc_shared::{Command, IrcMessage};
 
 use crate::channel::Channel;
-use crate::client::{Client, ClientHandle, ClientId, ClientInfo, ClientKind, NodeId};
+use crate::client::{Client, ClientHandle, ClientId, ClientInfo, ClientKind, NodeId, cap};
 
 use super::{NUM_SHARDS, NickError, SharedState, is_valid_nick};
 
@@ -74,11 +74,10 @@ impl SharedState {
         if !empty_keys.is_empty() {
             let mut map = self.inner.channels.write().await;
             for key in &empty_keys {
-                if let Some(arc) = map.get(key) {
-                    if arc.read().await.members.is_empty() {
+                if let Some(arc) = map.get(key)
+                    && arc.read().await.members.is_empty() {
                         map.remove(key);
                     }
-                }
             }
         }
 
@@ -128,11 +127,10 @@ impl SharedState {
         let mut nick_index = self.inner.nick_index.write().await;
 
         // Check uniqueness via index (O(1)).
-        if let Some(&existing_id) = nick_index.get(&new_lower) {
-            if existing_id != id {
+        if let Some(&existing_id) = nick_index.get(&new_lower)
+            && existing_id != id {
                 return Err(NickError::InUse);
             }
-        }
 
         // Now acquire the shard for this client.
         let mut shard = self.user_shard(id).write().await;
@@ -161,6 +159,7 @@ impl SharedState {
     ///
     /// `account` is the NickServ account name if the client authenticated via
     /// SASL before completing registration, `None` otherwise.
+    #[allow(clippy::too_many_arguments)]
     pub async fn register_client(
         &self,
         id: ClientId,
@@ -171,6 +170,7 @@ impl SharedState {
         tx: tokio::sync::mpsc::Sender<Arc<str>>,
         cancel: CancellationToken,
         account: Option<String>,
+        caps: u32,
     ) -> Result<ClientHandle, NickError> {
         if !is_valid_nick(nick) {
             return Err(NickError::Invalid);
@@ -188,6 +188,7 @@ impl SharedState {
             account,
             modes: 0,
             away: None,
+            caps,
         });
 
         let server_name: Arc<str> = self.server_name().into();
@@ -266,11 +267,10 @@ impl SharedState {
         if !empty_keys.is_empty() {
             let mut map = self.inner.channels.write().await;
             for key in &empty_keys {
-                if let Some(arc) = map.get(key) {
-                    if arc.read().await.members.is_empty() {
+                if let Some(arc) = map.get(key)
+                    && arc.read().await.members.is_empty() {
                         map.remove(key);
                     }
-                }
             }
         }
     }
@@ -355,11 +355,10 @@ impl SharedState {
         if !empty_keys.is_empty() {
             let mut map = self.inner.channels.write().await;
             for key in &empty_keys {
-                if let Some(arc) = map.get(key) {
-                    if arc.read().await.members.is_empty() {
+                if let Some(arc) = map.get(key)
+                    && arc.read().await.members.is_empty() {
                         map.remove(key);
                     }
-                }
             }
         }
 
@@ -416,11 +415,10 @@ impl SharedState {
             }
             let shard = self.inner.users[i].read().await;
             for id in ids {
-                if let Some(c) = shard.get(id) {
-                    if c.is_local() {
+                if let Some(c) = shard.get(id)
+                    && c.is_local() {
                         handles.push(c.clone());
                     }
-                }
             }
         }
         handles
@@ -435,6 +433,46 @@ impl SharedState {
             let mut new_info = (*client.info).clone();
             new_info.away = message;
             client.info = Arc::new(new_info);
+        }
+    }
+
+    /// Update the authenticated account for a client and broadcast `ACCOUNT`
+    /// to all local peers in shared channels who have the `account-notify` cap.
+    ///
+    /// Passing `Some(name)` marks the client as identified to that account;
+    /// `None` clears the account (sends `ACCOUNT *` to peers).
+    pub async fn set_account(&self, id: ClientId, account: Option<String>) {
+        // Update the client's info.
+        let client_handle = {
+            let mut shard = self.user_shard(id).write().await;
+            if let Some(client) = shard.get_mut(&id) {
+                let mut new_info = (*client.info).clone();
+                new_info.identified = account.is_some();
+                new_info.account = account.clone();
+                client.info = Arc::new(new_info);
+                Some(client.clone())
+            } else {
+                None
+            }
+        };
+
+        let Some(client) = client_handle else { return };
+
+        // Build ACCOUNT message: ACCOUNT <name> or ACCOUNT *
+        let account_param = account.unwrap_or_else(|| "*".to_string());
+        let account_msg = IrcMessage {
+            tags: vec![],
+            prefix: Some(client.prefix()),
+            command: Command::Account,
+            params: vec![account_param],
+        };
+
+        // Broadcast to local peers with account-notify cap.
+        let peers = self.peers_in_shared_channels(id).await;
+        for peer in &peers {
+            if peer.info.has_cap(cap::ACCOUNT_NOTIFY) {
+                peer.send_message_tagged(&account_msg);
+            }
         }
     }
 
@@ -540,17 +578,17 @@ impl SharedState {
             }
             let shard = self.inner.users[i].read().await;
             for pid in ids {
-                if let Some(c) = shard.get(pid) {
-                    if c.is_local() {
+                if let Some(c) = shard.get(pid)
+                    && c.is_local() {
                         handles.push(c.clone());
                     }
-                }
             }
         }
         handles
     }
 
     /// Return handles for all currently connected local clients.
+    #[allow(dead_code)]
     pub async fn all_clients(&self) -> Vec<ClientHandle> {
         let mut result = Vec::new();
         for shard_lock in &self.inner.users {
@@ -568,6 +606,7 @@ impl SharedState {
     ///
     /// Used by the inbound relay handler to broadcast events (like NICK
     /// changes or QUITs from remote nodes) to local clients.
+    #[allow(dead_code)]
     pub async fn all_local_clients(&self) -> Vec<ClientHandle> {
         let mut result = Vec::new();
         for shard_lock in &self.inner.users {
@@ -597,6 +636,7 @@ impl SharedState {
 
     /// Return the set of `ClientId`s that share at least one channel with the
     /// given client.
+    #[allow(dead_code)]
     pub async fn co_members(&self, id: ClientId) -> HashSet<ClientId> {
         let arcs: Vec<Arc<RwLock<Channel>>> =
             self.inner.channels.read().await.values().cloned().collect();
@@ -613,6 +653,7 @@ impl SharedState {
     }
 
     /// Get the count of local clients.
+    #[allow(dead_code)]
     pub async fn local_client_count(&self) -> usize {
         let mut count = 0usize;
         for shard_lock in &self.inner.users {
@@ -623,6 +664,7 @@ impl SharedState {
     }
 
     /// Get the count of IRC operators online.
+    #[allow(dead_code)]
     pub async fn oper_count(&self) -> usize {
         let mut count = 0usize;
         for shard_lock in &self.inner.users {
@@ -732,6 +774,7 @@ impl SharedState {
         }
         for client in &clients {
             let error_msg = IrcMessage {
+                tags: vec![],
                 prefix: None,
                 command: Command::Unknown("ERROR".to_string()),
                 params: vec![format!(

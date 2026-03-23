@@ -12,6 +12,9 @@ export type NamedCommand =
   | "USER"
   | "PASS"
   | "QUIT"
+  // Capability negotiation
+  | "CAP"
+  | "AUTHENTICATE"
   // Messaging
   | "PRIVMSG"
   | "NOTICE"
@@ -30,6 +33,8 @@ export type NamedCommand =
   | "ISON"
   // Availability
   | "AWAY"
+  // Identity / account-notify (IRCv3)
+  | "ACCOUNT"
   // Moderation / social
   | "SILENCE"
   | "FRIEND"
@@ -44,6 +49,8 @@ const KNOWN_COMMANDS: ReadonlySet<string> = new Set<NamedCommand>([
   "USER",
   "PASS",
   "QUIT",
+  "CAP",
+  "AUTHENTICATE",
   "PRIVMSG",
   "NOTICE",
   "JOIN",
@@ -58,6 +65,7 @@ const KNOWN_COMMANDS: ReadonlySet<string> = new Set<NamedCommand>([
   "NAMES",
   "ISON",
   "AWAY",
+  "ACCOUNT",
   "SILENCE",
   "FRIEND",
   "PING",

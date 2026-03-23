@@ -32,6 +32,11 @@ struct Inner {
     buffer_size: usize,
     /// Whether we've completed registration.
     registered: bool,
+    /// Whether SASL authentication completed successfully.
+    ///
+    /// Used by the registration handler to decide whether to fall back to
+    /// NickServ IDENTIFY after RPL_WELCOME.
+    sasl_logged_in: bool,
 }
 
 /// State for a single channel.
@@ -60,6 +65,7 @@ impl ClientState {
                 channels: HashMap::new(),
                 buffer_size,
                 registered: false,
+                sasl_logged_in: false,
             })),
         }
     }
@@ -92,6 +98,16 @@ impl ClientState {
     /// Whether we're registered.
     pub async fn is_registered(&self) -> bool {
         self.inner.read().await.registered
+    }
+
+    /// Mark SASL authentication as successfully completed.
+    pub async fn set_sasl_logged_in(&self) {
+        self.inner.write().await.sasl_logged_in = true;
+    }
+
+    /// Whether SASL authentication completed successfully.
+    pub async fn is_sasl_logged_in(&self) -> bool {
+        self.inner.read().await.sasl_logged_in
     }
 
     /// Record that we joined a channel.
@@ -138,11 +154,10 @@ impl ClientState {
     /// Add a member to a channel.
     pub async fn add_member(&self, channel: &str, nick: &str) {
         let mut inner = self.inner.write().await;
-        if let Some(ch) = inner.channels.get_mut(&channel.to_ascii_lowercase()) {
-            if !ch.members.iter().any(|n| n.eq_ignore_ascii_case(nick)) {
+        if let Some(ch) = inner.channels.get_mut(&channel.to_ascii_lowercase())
+            && !ch.members.iter().any(|n| n.eq_ignore_ascii_case(nick)) {
                 ch.members.push(nick.to_string());
             }
-        }
     }
 
     /// Remove a member from a channel.

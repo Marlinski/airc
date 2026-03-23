@@ -1,36 +1,36 @@
 # ============================================================================
-# aircd — multi-stage Docker build
+# aircd — pre-built binary image (used by CI/CD release pipeline)
+#
+# Expects the binary to already exist at ./aircd in the build context.
+# The binary must be a statically-linked musl build
+# (target: x86_64-unknown-linux-musl).
+#
+# Local dev / from-source build: use the main Dockerfile instead.
+#
+# Usage:
+#   docker run -d \
+#     -p 6667:6667 -p 8080:8080 \
+#     -v aircd-data:/data \
+#     -v aircd-logs:/var/log/aircd \
+#     -e AIRCD_NAME=irc.example.com \
+#     ghcr.io/marlinski/aircd:latest
+#
+# TLS (optional — port 6697):
+#   -p 6697:6697 \
+#   -v /etc/letsencrypt/live/irc.example.com:/certs:ro \
+#   -e AIRCD_TLS_CERT=/certs/fullchain.pem \
+#   -e AIRCD_TLS_KEY=/certs/privkey.pem \
+#
+# IRC operators (optional — requires a config file):
+#   -v /path/to/aircd.toml:/data/aircd.toml:ro \
 # ============================================================================
-# Build:  docker build -t aircd .
-# Run:    docker run -d --name aircd \
-#           -p 6667:6667 -p 6697:6697 -p 8080:8080 \
-#           -v aircd-logs:/var/log/aircd \
-#           -e AIRCD_NAME=irc.openlore.xyz \
-#           aircd
-
-# ---------------------------------------------------------------------------
-# Stage 1: build
-# ---------------------------------------------------------------------------
-FROM rust:1.85-bookworm AS builder
-
-# Install protoc (required by prost-build).
-RUN apt-get update && apt-get install -y protobuf-compiler && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /src
-COPY . .
-
-RUN cargo build --release --package aircd
-
-# ---------------------------------------------------------------------------
-# Stage 2: runtime
-# ---------------------------------------------------------------------------
 FROM debian:bookworm-slim
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /src/target/release/aircd /usr/local/bin/aircd
+COPY aircd /usr/local/bin/aircd
 
 # Working directory — SQLite DB is created at data/services/aircd.db
 # relative to CWD, so this must match the /data volume mount.

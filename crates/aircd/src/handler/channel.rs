@@ -1,13 +1,12 @@
 //! Channel commands: JOIN, PART, TOPIC, NAMES, LIST, KICK, INVITE.
 
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use airc_shared::reply::*;
 use airc_shared::{Command, IrcMessage};
 use tracing::debug;
 
-use crate::client::ClientId;
+use crate::client::{ClientId, cap};
 use crate::relay::RelayEvent;
 use crate::state::SharedState;
 
@@ -32,10 +31,9 @@ pub async fn handle_join(state: &SharedState, client_id: ClientId, msg: &IrcMess
         let parted = state.part_all_channels(client_id).await;
         for (channel_name, remaining) in parted {
             let part_msg = IrcMessage::part(&channel_name, None).with_prefix(client.prefix());
-            let line: Arc<str> = part_msg.serialize().into();
-            client.send_line(&line);
+            client.send_message_tagged(&part_msg);
             for member in &remaining {
-                member.send_line(&line);
+                member.send_message_tagged(&part_msg);
             }
             state
                 .relay_publish(RelayEvent::Part {
@@ -105,12 +103,11 @@ pub async fn handle_join(state: &SharedState, client_id: ClientId, msg: &IrcMess
         }
 
         // ChanServ access check (reputation-gated join).
-        if let Some(svc) = state.services() {
-            if let Err(reason) = svc.check_join(channel_name, &client.info.nick).await {
+        if let Some(svc) = state.services()
+            && let Err(reason) = svc.check_join(channel_name, &client.info.nick).await {
                 client.send_numeric(ERR_BANNEDFROMCHAN, &[channel_name, &reason]);
                 continue;
             }
-        }
 
         // CRDT ban list check via PersistentState.
         if let Some(ps) = state.persistent() {
@@ -135,10 +132,30 @@ pub async fn handle_join(state: &SharedState, client_id: ClientId, msg: &IrcMess
             .await;
 
         // Broadcast JOIN to all members (including the joiner).
+        // Clients with extended-join cap receive: JOIN #chan account :realname
+        // Others receive: JOIN #chan
         let join_msg = IrcMessage::join(&channel.name).with_prefix(client.prefix());
-        let line: Arc<str> = join_msg.serialize().into();
+        let account_str = client
+            .info
+            .account
+            .clone()
+            .unwrap_or_else(|| "*".to_string());
+        let ext_join_msg = IrcMessage {
+            tags: vec![],
+            prefix: Some(client.prefix()),
+            command: airc_shared::Command::Join,
+            params: vec![
+                channel.name.clone(),
+                account_str,
+                client.info.realname.clone(),
+            ],
+        };
         for member in &members {
-            member.send_line(&line);
+            if member.info.has_cap(cap::EXTENDED_JOIN) {
+                member.send_message_tagged(&ext_join_msg);
+            } else {
+                member.send_message_tagged(&join_msg);
+            }
         }
 
         // Send topic and NAMES to the joining client.
@@ -177,10 +194,9 @@ pub async fn handle_part(state: &SharedState, client_id: ClientId, msg: &IrcMess
 
         match state.part_channel(client_id, channel_name).await {
             Some(remaining) => {
-                let line: Arc<str> = part_msg.serialize().into();
-                client.send_line(&line);
+                client.send_message_tagged(&part_msg);
                 for member in &remaining {
-                    member.send_line(&line);
+                    member.send_message_tagged(&part_msg);
                 }
                 state
                     .relay_publish(RelayEvent::Part {
@@ -264,13 +280,13 @@ pub async fn handle_topic(state: &SharedState, client_id: ClientId, msg: &IrcMes
                 .await
             {
                 let topic_msg = IrcMessage {
+                    tags: vec![],
                     prefix: Some(client.prefix()),
                     command: Command::Topic,
                     params: vec![channel_name.to_string(), new_topic.clone()],
                 };
-                let line: Arc<str> = topic_msg.serialize().into();
                 for member in &members {
-                    member.send_line(&line);
+                    member.send_message_tagged(&topic_msg);
                 }
                 state
                     .relay_publish(RelayEvent::Topic {
@@ -361,6 +377,7 @@ pub async fn handle_kick(state: &SharedState, client_id: ClientId, msg: &IrcMess
 
     // Broadcast KICK before removing.
     let kick_msg = IrcMessage {
+        tags: vec![],
         prefix: Some(client.prefix()),
         command: Command::Kick,
         params: vec![
@@ -371,9 +388,8 @@ pub async fn handle_kick(state: &SharedState, client_id: ClientId, msg: &IrcMess
     };
 
     if let Some(members) = state.channel_members(channel_name).await {
-        let line: Arc<str> = kick_msg.serialize().into();
         for member in &members {
-            member.send_line(&line);
+            member.send_message_tagged(&kick_msg);
         }
     }
 
@@ -446,11 +462,12 @@ pub async fn handle_invite(state: &SharedState, client_id: ClientId, msg: &IrcMe
     client.send_numeric(RPL_INVITING, &[&target.info.nick, channel_name]);
 
     let invite_msg = IrcMessage {
+        tags: vec![],
         prefix: Some(client.prefix()),
         command: Command::Invite,
         params: vec![target.info.nick.clone(), channel_name.to_string()],
     };
-    target.send_message(&invite_msg);
+    target.send_message_tagged(&invite_msg);
 
     if let Some(ref away_msg) = target.info.away {
         client.send_numeric(RPL_AWAY, &[&target.info.nick, away_msg]);

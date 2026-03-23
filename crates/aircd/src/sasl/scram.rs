@@ -19,27 +19,21 @@
 //!
 //! # Implementation notes
 //!
-//! * We use PBKDF2-HMAC-SHA-256 for key derivation (SaltedPassword).
-//! * Salts are stored per-account in `PasswordRecord::scram_salt` and
-//!   `PasswordRecord::scram_iterations`.  If a record has no stored SCRAM
-//!   parameters we derive them on the fly and store them back (future work —
-//!   for now we derive a deterministic salt from the password hash so that
-//!   the handshake works without a separate DB migration).
-//! * Channel binding (`p=tls-unique`) is not implemented; we reject any
-//!   `p=` channel-binding flag and only accept `n,,` (no binding).
+//! * At registration time the server pre-computes `(StoredKey, ServerKey, salt,
+//!   iterations)` and stores them in the database (see `nickserv/persist.rs`).
+//! * At login time this mechanism reads the stored values directly — no PBKDF2
+//!   is performed server-side during authentication.
+//! * Channel binding (`p=tls-unique`) is not implemented; we reject any `p=`
+//!   channel-binding flag and only accept `n,,` (no binding) or `y,,`.
 
-use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use hmac::{Hmac, Mac};
-use pbkdf2::pbkdf2_hmac;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 
 use super::{PasswordLookup, PasswordRecord, SaslError, SaslMechanism, SaslStep};
 
 type HmacSha256 = Hmac<Sha256>;
-
-/// Number of PBKDF2 iterations.  RFC 5802 recommends ≥ 4096; we use 4096.
-const ITERATIONS: u32 = 4096;
 
 // ---------------------------------------------------------------------------
 // State machine
@@ -175,10 +169,15 @@ impl ScramSha256Mechanism {
         let account_lower = authcid.to_ascii_lowercase();
         let record: PasswordRecord = (self.lookup)(&account_lower).ok_or(SaslError::AuthFailed)?;
 
-        // Derive SCRAM keys from the stored password hash.
-        let (salt, salted_password) = derive_keys(&record.password_sha256);
-        let (client_key, stored_key, server_key) = compute_keys(&salted_password);
-        let _ = client_key; // not needed server-side
+        // Read pre-computed stored keys from the credential record.
+        // No PBKDF2 is performed at login time.
+        let stored_key = decode_key_hex(&record.scram_stored_key)
+            .ok_or_else(|| SaslError::Malformed("invalid stored_key in credential store".into()))?;
+        let server_key = decode_key_hex(&record.scram_server_key)
+            .ok_or_else(|| SaslError::Malformed("invalid server_key in credential store".into()))?;
+        let salt = hex::decode(&record.scram_salt)
+            .map_err(|_| SaslError::Malformed("invalid salt in credential store".into()))?;
+        let iterations = record.scram_iterations;
 
         // Build server nonce = client nonce + 18 random bytes (base64).
         let mut rnd = [0u8; 18];
@@ -186,8 +185,8 @@ impl ScramSha256Mechanism {
         let server_nonce = format!("{}{}", client_nonce, BASE64.encode(rnd));
 
         // server-first-message: r=<server_nonce>,s=<salt_b64>,i=<iterations>
-        let salt_b64 = BASE64.encode(salt);
-        let server_first = format!("r={server_nonce},s={salt_b64},i={ITERATIONS}");
+        let salt_b64 = BASE64.encode(&salt);
+        let server_first = format!("r={server_nonce},s={salt_b64},i={iterations}");
         let server_first_b64 = BASE64.encode(server_first.as_bytes());
 
         self.state = State::AwaitingClientFinal {
@@ -298,34 +297,10 @@ fn sha256(data: &[u8]) -> [u8; 32] {
     h.finalize().into()
 }
 
-/// Derive a deterministic 16-byte salt and then compute SaltedPassword via PBKDF2.
-///
-/// We derive the salt from SHA-256(password_sha256 + "scram-salt") so that
-/// accounts created before SCRAM was implemented still work without a DB
-/// migration.  In a production system you would store salt per-account.
-fn derive_keys(password_sha256: &str) -> ([u8; 16], [u8; 32]) {
-    // Deterministic salt: first 16 bytes of SHA-256(password_sha256 + ":scram").
-    let mut h = Sha256::new();
-    h.update(password_sha256.as_bytes());
-    h.update(b":scram");
-    let hash = h.finalize();
-    let mut salt = [0u8; 16];
-    salt.copy_from_slice(&hash[..16]);
-
-    // SaltedPassword = PBKDF2(HMAC-SHA-256, password, salt, iterations, 32)
-    // We use password_sha256 as the password input so we never need the raw password.
-    // CPU-heavy work is offloaded to spawn_blocking at the call site (connection.rs).
-    let mut salted = [0u8; 32];
-    pbkdf2_hmac::<Sha256>(password_sha256.as_bytes(), &salt, ITERATIONS, &mut salted);
-
-    (salt, salted)
-}
-
-fn compute_keys(salted_password: &[u8; 32]) -> ([u8; 32], [u8; 32], [u8; 32]) {
-    let client_key = hmac_sha256(salted_password, b"Client Key");
-    let stored_key = sha256(&client_key);
-    let server_key = hmac_sha256(salted_password, b"Server Key");
-    (client_key, stored_key, server_key)
+/// Decode a 32-byte key from a hex string.
+fn decode_key_hex(hex_str: &str) -> Option<[u8; 32]> {
+    let bytes = hex::decode(hex_str).ok()?;
+    bytes.try_into().ok()
 }
 
 /// Parse `key=value,key=value,...` into a map.  Values may contain `=`.

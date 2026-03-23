@@ -117,15 +117,29 @@ pub const SUPPORTED_MECHANISMS: &str = "PLAIN,SCRAM-SHA-256";
 
 /// The stored credential data for one account.
 ///
-/// Mechanisms only need what they need — PLAIN checks the SHA-256 hash,
-/// SCRAM needs the stored salt and iteration count to reconstruct server keys.
+/// At registration time the server derives all key material from the raw
+/// password and stores only what is needed for each mechanism:
+///
+/// - **SCRAM-SHA-256**: `(stored_key, server_key, scram_salt, scram_iterations)`.
+///   These are used directly at login — no PBKDF2 at login time.
+/// - **PLAIN**: `bcrypt_hash` — verified with `bcrypt::verify`.
+///
+/// The raw password is never stored.
 #[derive(Clone)]
-#[allow(dead_code)]
 pub struct PasswordRecord {
     /// Lowercase account name.
+    #[allow(dead_code)]
     pub account: String,
-    /// SHA-256 hex digest of the password (used by PLAIN).
-    pub password_sha256: String,
+    /// StoredKey = SHA256(HMAC(SaltedPassword, "Client Key")), hex-encoded.
+    pub scram_stored_key: String,
+    /// ServerKey = HMAC(SaltedPassword, "Server Key"), hex-encoded.
+    pub scram_server_key: String,
+    /// Random 16-byte salt used for PBKDF2, hex-encoded.
+    pub scram_salt: String,
+    /// PBKDF2 iteration count used when deriving SaltedPassword.
+    pub scram_iterations: u32,
+    /// bcrypt hash of the password (for PLAIN auth).
+    pub bcrypt_hash: String,
 }
 
 // ---------------------------------------------------------------------------

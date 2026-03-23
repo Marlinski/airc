@@ -311,7 +311,7 @@ impl Relay for RedisRelay {
                     .into_iter()
                     .map(|ch| {
                         let (topic_text, topic_setter, topic_ts) =
-                            ch.topic.map(|(t, s, ts)| (t, s, ts)).unwrap_or_default();
+                            ch.topic.unwrap_or_default();
                         let mut mode_flags: u32 = 0;
                         if ch.modes.invite_only {
                             mode_flags |= 1 << 0;
@@ -451,14 +451,9 @@ impl Relay for RedisRelay {
                                 }
                             };
                             let mut keys = HashSet::new();
-                            loop {
-                                match scan_stream.next_item().await {
-                                    Some(key) => {
-                                        if let Some(id) = key.strip_prefix(HEARTBEAT_KEY_PREFIX) {
-                                            keys.insert(id.to_string());
-                                        }
-                                    }
-                                    None => break,
+                            while let Some(key) = scan_stream.next_item().await {
+                                if let Some(id) = key.strip_prefix(HEARTBEAT_KEY_PREFIX) {
+                                    keys.insert(id.to_string());
                                 }
                             }
                             keys
@@ -594,9 +589,13 @@ fn envelope_to_relay_event(envelope: RelayEnvelope, source_node: NodeId) -> Opti
                 account: None,
                 modes: 0,
                 away: None,
+                caps: 0,
             });
             let client = Client::new_remote(id, info, source_node.clone());
-            Some(RelayEvent::ClientIntro { client, node_id: source_node })
+            Some(RelayEvent::ClientIntro {
+                client,
+                node_id: source_node,
+            })
         }
         ProtoEvent::ClientDown(cd) => {
             let id = parse_client_id(&cd.client_id)?;
@@ -728,6 +727,7 @@ fn envelope_to_relay_event(envelope: RelayEnvelope, source_node: NodeId) -> Opti
                         } else {
                             Some(c.away)
                         },
+                        caps: 0,
                     };
                     SnapshotClient {
                         client_id: ClientId(c.client_id),

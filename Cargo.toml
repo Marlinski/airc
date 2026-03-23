@@ -50,3 +50,5 @@ hmac = "0.12"
 pbkdf2 = "0.12"
 tokio-util = { version = "0.7", features = ["rt"] }
 dashmap = "6"
+bcrypt = "0.15"
+chrono = { version = "0.4", features = ["serde"] }

@@ -42,6 +42,8 @@ pub fn event_type_to_str(et: i32) -> &'static str {
         Ok(EventType::Topic) => "topic",
         Ok(EventType::Nick) => "nick",
         Ok(EventType::Notice) => "notice",
+        Ok(EventType::Away) => "away",
+        Ok(EventType::Account) => "account",
         Err(_) => "unknown",
     }
 }
@@ -57,6 +59,8 @@ pub fn event_type_from_str(s: &str) -> Option<i32> {
         "topic" => EventType::Topic,
         "nick" => EventType::Nick,
         "notice" => EventType::Notice,
+        "away" => EventType::Away,
+        "account" => EventType::Account,
         _ => return None,
     };
     Some(et as i32)
@@ -251,9 +255,8 @@ pub fn sanitize_filename(name: &str) -> String {
     if name.is_empty() {
         return "_server".to_string();
     }
-    name.trim_start_matches(|c| c == '#' || c == '&')
-        .replace('/', "_")
-        .replace('\\', "_")
+    name.trim_start_matches(['#', '&'])
+        .replace(['/', '\\'], "_")
         .to_lowercase()
 }
 

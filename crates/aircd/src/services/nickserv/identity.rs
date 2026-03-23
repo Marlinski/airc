@@ -4,11 +4,13 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use subtle::ConstantTimeEq;
 use tracing::{info, warn};
 
 use crate::services::module::{CommandContext, ServiceModule};
-use crate::services::nickserv::{Identity, NickServState, hash_password, now_unix};
+use crate::services::nickserv::{
+    Identity, NickServState, bcrypt_hash_password, bcrypt_verify_password,
+    derive_scram_credentials, now_unix,
+};
 
 /// Identity management module for NickServ.
 pub struct IdentityModule {
@@ -35,9 +37,20 @@ impl IdentityModule {
             return;
         }
 
+        // Derive SCRAM-SHA-256 key material and bcrypt hash from the raw
+        // password.  This is the only time the raw password is available;
+        // it is never stored.
+        let (scram_stored_key, scram_server_key, scram_salt, scram_iterations) =
+            derive_scram_credentials(password);
+        let bcrypt_hash = bcrypt_hash_password(password);
+
         let identity = Identity {
             nick: ctx.sender.to_string(),
-            password_hash: Some(hash_password(password)),
+            scram_stored_key: Some(scram_stored_key),
+            scram_server_key: Some(scram_server_key),
+            scram_salt: Some(scram_salt),
+            scram_iterations: Some(scram_iterations),
+            bcrypt_hash: Some(bcrypt_hash),
             pubkey_hex: None,
             registered_at: now_unix(),
             reputation: 0,
@@ -62,15 +75,19 @@ impl IdentityModule {
             None => {
                 ctx.reply("This nickname is not registered.").await;
             }
-            Some(identity) => match &identity.password_hash {
-                Some(hash)
-                    if hash
-                        .as_bytes()
-                        .ct_eq(hash_password(password).as_bytes())
-                        .into() =>
-                {
+            Some(identity) => match &identity.bcrypt_hash {
+                Some(hash) if bcrypt_verify_password(password, hash) => {
                     ctx.reply("You are now identified.").await;
                     info!(nick = %ctx.sender, "NickServ: identified via password");
+
+                    // Update the client's account field and broadcast ACCOUNT
+                    // to peers who have the account-notify capability.
+                    let shared = self.state.shared_state();
+                    if let Some(client) = shared.find_client_by_nick(ctx.sender).await {
+                        shared
+                            .set_account(client.id, Some(identity.nick.clone()))
+                            .await;
+                    }
                 }
                 Some(_) => {
                     ctx.reply("Incorrect password.").await;
@@ -139,12 +156,8 @@ impl IdentityModule {
         };
 
         // Verify password.
-        match &identity.password_hash {
-            Some(hash)
-                if hash
-                    .as_bytes()
-                    .ct_eq(hash_password(password).as_bytes())
-                    .into() => {}
+        match &identity.bcrypt_hash {
+            Some(hash) if bcrypt_verify_password(password, hash) => {}
             Some(_) => {
                 ctx.reply("Incorrect password.").await;
                 warn!(nick = %ctx.sender, target = %nick, "NickServ: failed GHOST password");
@@ -171,7 +184,7 @@ impl IdentityModule {
 
                 // Broadcast QUIT to peers.
                 let quit_msg = airc_shared::IrcMessage::quit(Some(&kill_reason))
-                    .with_prefix(&disconnected.prefix());
+                    .with_prefix(disconnected.prefix());
                 let quit_line: Arc<str> = quit_msg.serialize().into();
                 for peer in &peers {
                     peer.send_line(&quit_line);

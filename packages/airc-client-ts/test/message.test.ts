@@ -396,3 +396,99 @@ describe("IrcMessage builders", () => {
     expect(msg.serialize()).toBe("PONG token123");
   });
 });
+
+// ===========================================================================
+// IRCv3 message-tags tests
+// ===========================================================================
+
+describe("IrcMessage tags", () => {
+  it("parses bare tag (no value)", () => {
+    const msg = IrcMessage.parse("@draft/msgid :nick!u@h PRIVMSG #chan :hi");
+    expect(msg.tags).toEqual([["draft/msgid", undefined]]);
+    expect(msg.command).toEqual({ kind: "named", name: "PRIVMSG" });
+  });
+
+  it("parses key=value tag", () => {
+    const msg = IrcMessage.parse("@time=2026-01-01T12:00:00.000Z :nick!u@h PRIVMSG #chan :hi");
+    expect(msg.tags).toEqual([["time", "2026-01-01T12:00:00.000Z"]]);
+  });
+
+  it("parses multiple tags", () => {
+    const msg = IrcMessage.parse("@time=2026-01-01T12:00:00.000Z;msgid=abc123 :nick!u@h PRIVMSG #chan :hi");
+    expect(msg.tags).toHaveLength(2);
+    expect(msg.tags[0]).toEqual(["time", "2026-01-01T12:00:00.000Z"]);
+    expect(msg.tags[1]).toEqual(["msgid", "abc123"]);
+  });
+
+  it("parses tags with no prefix", () => {
+    const msg = IrcMessage.parse("@foo=bar PING token");
+    expect(msg.tags).toEqual([["foo", "bar"]]);
+    expect(msg.command).toEqual({ kind: "named", name: "PING" });
+  });
+
+  it("unescapes \\: to semicolon", () => {
+    const msg = IrcMessage.parse("@foo=a\\:b :n!u@h PRIVMSG #c :x");
+    expect(msg.tags[0]).toEqual(["foo", "a;b"]);
+  });
+
+  it("unescapes \\s to space", () => {
+    const msg = IrcMessage.parse("@foo=a\\sb :n!u@h PRIVMSG #c :x");
+    expect(msg.tags[0]).toEqual(["foo", "a b"]);
+  });
+
+  it("unescapes \\\\ to backslash", () => {
+    const msg = IrcMessage.parse("@foo=a\\\\b :n!u@h PRIVMSG #c :x");
+    expect(msg.tags[0]).toEqual(["foo", "a\\b"]);
+  });
+
+  it("passes through unknown escape", () => {
+    const msg = IrcMessage.parse("@foo=a\\xb :n!u@h PRIVMSG #c :x");
+    expect(msg.tags[0]).toEqual(["foo", "axb"]);
+  });
+
+  it("empty tags array when no tag block", () => {
+    const msg = IrcMessage.parse(":nick!u@h PRIVMSG #chan :hi");
+    expect(msg.tags).toEqual([]);
+  });
+
+  it("tag() lookup returns value for present key", () => {
+    const msg = IrcMessage.parse("@time=2026-01-01T12:00:00.000Z :n!u@h PRIVMSG #c :x");
+    expect(msg.tag("time")).toBe("2026-01-01T12:00:00.000Z");
+  });
+
+  it("tag() lookup returns null for absent key", () => {
+    const msg = IrcMessage.parse("@time=2026-01-01T12:00:00.000Z :n!u@h PRIVMSG #c :x");
+    expect(msg.tag("msgid")).toBeNull();
+  });
+
+  it("tag() lookup returns undefined for bare key", () => {
+    const msg = IrcMessage.parse("@draft/labeled-response :n!u@h PRIVMSG #c :x");
+    expect(msg.tag("draft/labeled-response")).toBeUndefined();
+  });
+
+  it("withTag() adds a tag to a copy", () => {
+    const base = IrcMessage.parse(":n!u@h PRIVMSG #c :x");
+    const tagged = base.withTag("time", "2026-01-01T12:00:00.000Z");
+    expect(base.tags).toHaveLength(0);
+    expect(tagged.tags).toEqual([["time", "2026-01-01T12:00:00.000Z"]]);
+  });
+
+  it("withTag() bare tag (no value)", () => {
+    const base = IrcMessage.parse(":n!u@h PRIVMSG #c :x");
+    const tagged = base.withTag("echo-message");
+    expect(tagged.tags).toEqual([["echo-message", undefined]]);
+  });
+
+  it("parses tagged message with correct params", () => {
+    const msg = IrcMessage.parse("@time=2026-01-01T00:00:00.000Z :alice!a@host PRIVMSG #lobby :hello world");
+    expect(msg.prefix).toBe("alice!a@host");
+    expect(msg.params).toEqual(["#lobby", "hello world"]);
+  });
+
+  it("multi-line LS with * marker", () => {
+    // A plain (non-tagged) message is not affected by tag parsing.
+    const msg = IrcMessage.parse(":server CAP * LS * :sasl message-tags");
+    expect(msg.tags).toEqual([]);
+    expect(msg.params[2]).toBe("*");
+  });
+});

@@ -33,6 +33,7 @@ export {
   type ChannelStatus,
   MessageKind,
   newChannelMessage,
+  newChannelMessageWithTs,
 } from "./event.js";
 export { ClientState, type ChannelState } from "./state.js";
 

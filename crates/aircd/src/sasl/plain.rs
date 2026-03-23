@@ -14,11 +14,10 @@
 //! **Security:** PLAIN transmits the password in the clear (base64 is not
 //! encryption).  It must only be used over a TLS connection.
 
-use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
-use subtle::ConstantTimeEq;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
 use super::{PasswordLookup, PasswordRecord, SaslError, SaslMechanism, SaslStep};
-use crate::services::nickserv::hash_password;
+use crate::services::nickserv::bcrypt_verify_password;
 
 // ---------------------------------------------------------------------------
 // State machine
@@ -95,13 +94,7 @@ impl SaslMechanism for PlainMechanism {
                 let record: PasswordRecord =
                     (self.lookup)(&account_lower).ok_or(SaslError::AuthFailed)?;
 
-                let expected = hash_password(passwd);
-                if record
-                    .password_sha256
-                    .as_bytes()
-                    .ct_eq(expected.as_bytes())
-                    .into()
-                {
+                if bcrypt_verify_password(passwd, &record.bcrypt_hash) {
                     Ok(SaslStep::Done {
                         account: account_lower,
                     })
@@ -120,14 +113,21 @@ impl SaslMechanism for PlainMechanism {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+    use crate::services::nickserv::{bcrypt_hash_password, derive_scram_credentials};
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
     fn make_lookup(nick: &str, password: &str) -> PasswordLookup {
+        let (scram_stored_key, scram_server_key, scram_salt, scram_iterations) =
+            derive_scram_credentials(password);
+        let bcrypt_hash = bcrypt_hash_password(password);
         let record = PasswordRecord {
             account: nick.to_string(),
-            password_sha256: hash_password(password),
+            scram_stored_key,
+            scram_server_key,
+            scram_salt,
+            scram_iterations,
+            bcrypt_hash,
         };
-        let record = record.clone();
         Box::new(move |name: &str| {
             if name == record.account {
                 Some(record.clone())

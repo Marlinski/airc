@@ -46,7 +46,11 @@ impl KeypairModule {
 
         let identity = Identity {
             nick: ctx.sender.to_string(),
-            password_hash: None,
+            scram_stored_key: None,
+            scram_server_key: None,
+            scram_salt: None,
+            scram_iterations: None,
+            bcrypt_hash: None,
             pubkey_hex: Some(pubkey_hex.to_string()),
             registered_at: now_unix(),
             reputation: 0,
@@ -141,7 +145,7 @@ impl KeypairModule {
         }
 
         let signature = Signature::from_bytes(&sig_bytes.try_into().unwrap());
-        let nonce = challenge.nonce.clone();
+        let nonce = challenge.nonce;
 
         // Ed25519 verify is CPU-bound — move off the async executor.
         let verified =

@@ -11,9 +11,17 @@ use serde::{Deserialize, Serialize};
 pub struct Identity {
     /// The canonical (original casing) nickname.
     pub nick: String,
-    /// Password hash (for MVP we store a simple hash — see note).
+    /// StoredKey for SCRAM-SHA-256, hex-encoded.
     /// `None` if the user registered with a keypair only.
-    pub password_hash: Option<String>,
+    pub scram_stored_key: Option<String>,
+    /// ServerKey for SCRAM-SHA-256, hex-encoded.
+    pub scram_server_key: Option<String>,
+    /// Random 16-byte PBKDF2 salt, hex-encoded.
+    pub scram_salt: Option<String>,
+    /// PBKDF2 iteration count used during registration.
+    pub scram_iterations: Option<u32>,
+    /// bcrypt hash of the password (for PLAIN auth).
+    pub bcrypt_hash: Option<String>,
     /// Ed25519 public key in hex, if registered via keypair.
     pub pubkey_hex: Option<String>,
     /// Unix timestamp of registration.

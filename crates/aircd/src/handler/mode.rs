@@ -1,7 +1,5 @@
 //! MODE — channel and user mode handling.
 
-use std::sync::Arc;
-
 use airc_shared::reply::*;
 use airc_shared::{Command, IrcMessage};
 
@@ -46,11 +44,12 @@ pub async fn handle_mode(state: &SharedState, client_id: ClientId, msg: &IrcMess
                         // Echo the mode change back to the client.
                         let flag = if setting { "+i" } else { "-i" };
                         let mode_msg = IrcMessage {
+                            tags: vec![],
                             prefix: Some(client.prefix()),
                             command: Command::Mode,
                             params: vec![client.info.nick.clone(), flag.to_string()],
                         };
-                        client.send_message(&mode_msg);
+                        client.send_message_tagged(&mode_msg);
                     }
                     _ => {
                         // Other user modes are not yet implemented.
@@ -61,11 +60,12 @@ pub async fn handle_mode(state: &SharedState, client_id: ClientId, msg: &IrcMess
             // No mode string — echo back current modes.
             let mode_str = state.user_mode_string(client_id).await;
             let mode_msg = IrcMessage {
+                tags: vec![],
                 prefix: Some(state.server_name().to_string()),
                 command: Command::Numeric(221), // RPL_UMODEIS
                 params: vec![client.info.nick.clone(), mode_str],
             };
-            client.send_message(&mode_msg);
+            client.send_message_tagged(&mode_msg);
         }
     }
 }
@@ -156,14 +156,14 @@ async fn handle_channel_mode(
                     format!("-o {target_nick}")
                 };
                 let mode_msg = IrcMessage {
+                    tags: vec![],
                     prefix: Some(client.prefix()),
                     command: Command::Mode,
                     params: vec![channel_name.to_string(), mode_change.clone()],
                 };
                 if let Some(members) = state.channel_members(channel_name).await {
-                    let line: Arc<str> = mode_msg.serialize().into();
                     for member in &members {
-                        member.send_line(&line);
+                        member.send_message_tagged(&mode_msg);
                     }
                 }
 
@@ -194,14 +194,14 @@ async fn handle_channel_mode(
                     format!("-{ch}")
                 };
                 let mode_msg = IrcMessage {
+                    tags: vec![],
                     prefix: Some(client.prefix()),
                     command: Command::Mode,
                     params: vec![channel_name.to_string(), flag.clone()],
                 };
                 if let Some(members) = state.channel_members(channel_name).await {
-                    let line: Arc<str> = mode_msg.serialize().into();
                     for member in &members {
-                        member.send_line(&line);
+                        member.send_message_tagged(&mode_msg);
                     }
                 }
 
@@ -255,14 +255,14 @@ async fn handle_channel_mode(
                     format!("-v {target_nick}")
                 };
                 let mode_msg = IrcMessage {
+                    tags: vec![],
                     prefix: Some(client.prefix()),
                     command: Command::Mode,
                     params: vec![channel_name.to_string(), mode_change.clone()],
                 };
                 if let Some(members) = state.channel_members(channel_name).await {
-                    let line: Arc<str> = mode_msg.serialize().into();
                     for member in &members {
-                        member.send_line(&line);
+                        member.send_message_tagged(&mode_msg);
                     }
                 }
 
@@ -305,14 +305,14 @@ async fn handle_channel_mode(
                     "-k".to_string()
                 };
                 let mode_msg = IrcMessage {
+                    tags: vec![],
                     prefix: Some(client.prefix()),
                     command: Command::Mode,
                     params: vec![channel_name.to_string(), mode_change.clone()],
                 };
                 if let Some(members) = state.channel_members(channel_name).await {
-                    let line: Arc<str> = mode_msg.serialize().into();
                     for member in &members {
-                        member.send_line(&line);
+                        member.send_message_tagged(&mode_msg);
                     }
                 }
 
@@ -350,14 +350,14 @@ async fn handle_channel_mode(
                     "-l".to_string()
                 };
                 let mode_msg = IrcMessage {
+                    tags: vec![],
                     prefix: Some(client.prefix()),
                     command: Command::Mode,
                     params: vec![channel_name.to_string(), mode_change.clone()],
                 };
                 if let Some(members) = state.channel_members(channel_name).await {
-                    let line: Arc<str> = mode_msg.serialize().into();
                     for member in &members {
-                        member.send_line(&line);
+                        member.send_message_tagged(&mode_msg);
                     }
                 }
 
@@ -422,14 +422,14 @@ async fn handle_channel_mode(
                     format!("-b {mask}")
                 };
                 let mode_msg = IrcMessage {
+                    tags: vec![],
                     prefix: Some(client.prefix()),
                     command: Command::Mode,
                     params: vec![channel_name.to_string(), mode_change.clone()],
                 };
                 if let Some(members) = state.channel_members(channel_name).await {
-                    let line: Arc<str> = mode_msg.serialize().into();
                     for member in &members {
-                        member.send_line(&line);
+                        member.send_message_tagged(&mode_msg);
                     }
                 }
 

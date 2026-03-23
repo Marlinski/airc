@@ -29,4 +29,4 @@ pub(crate) use persist::{hex_decode, hex_encode, now_unix, parse_pubkey};
 pub(crate) use types::{Identity, PendingChallenge};
 
 // Re-exported for the SASL layer and any other crate-internal consumers.
-pub use persist::hash_password;
+pub use persist::{bcrypt_hash_password, bcrypt_verify_password, derive_scram_credentials};

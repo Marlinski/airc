@@ -278,11 +278,12 @@ fn make_remote_client(
         account: None,
         modes: 0,
         away: None,
+        caps: 0,
     });
     Client::new_remote(id, info, node_id)
 }
 
-mod relay_outbound;
-mod relay_inbound;
 mod crdt;
+mod relay_inbound;
+mod relay_outbound;
 mod snapshot;

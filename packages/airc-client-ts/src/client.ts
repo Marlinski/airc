@@ -17,7 +17,7 @@ import type { ClientConfig } from "./config.js";
 import { resolveConfig } from "./config.js";
 import { IrcMessage } from "./message.js";
 import { extractNick } from "./prefix.js";
-import { type IrcEvent, type ChannelMessage, type ChannelStatus, MessageKind, newChannelMessage } from "./event.js";
+import { type IrcEvent, type ChannelMessage, type ChannelStatus, MessageKind, newChannelMessage, newChannelMessageWithTs } from "./event.js";
 import { ClientState } from "./state.js";
 import { Backoff, type ReconnectConfig, resolveReconnectConfig } from "./reconnect.js";
 
@@ -32,6 +32,36 @@ const RPL_MOTDSTART = 375;
 const RPL_MOTD = 372;
 const RPL_ENDOFMOTD = 376;
 const ERR_NICKNAMEINUSE = 433;
+const RPL_LOGGEDIN = 900;
+const RPL_SASLSUCCESS = 903;
+const ERR_SASLFAIL = 904;
+const ERR_SASLABORTED = 906;
+
+// ---------------------------------------------------------------------------
+// IRCv3 optional capabilities we request (server-advertised intersection)
+// ---------------------------------------------------------------------------
+
+const OPTIONAL_CAPS: readonly string[] = [
+  "message-tags",
+  "server-time",
+  "echo-message",
+  "away-notify",
+  "multi-prefix",
+  "extended-join",
+  "account-notify",
+];
+
+// ---------------------------------------------------------------------------
+// SASL state
+// ---------------------------------------------------------------------------
+
+interface SaslState {
+  account: string;
+  password: string;
+  mechanism: "PLAIN" | null;
+  step: "awaiting_cap_ack" | "awaiting_challenge" | "awaiting_success" | "done";
+  loggedIn: boolean;
+}
 
 // ---------------------------------------------------------------------------
 // Event emitter types
@@ -54,6 +84,8 @@ export class AircClient {
   private _reconnectConfig: ReturnType<typeof resolveReconnectConfig>;
   private _autoReconnect = true;
   private _destroyed = false;
+  private _saslState: SaslState | null = null;
+  private _negotiatedCaps: Set<string> = new Set();
 
   constructor(config: ClientConfig, reconnect?: ReconnectConfig) {
     this._config = resolveConfig(config);
@@ -85,6 +117,18 @@ export class AircClient {
       let motdDone = false;
       let registered = false;
 
+      // Initialise SASL state for this connection attempt.
+      this._negotiatedCaps = new Set();
+      this._saslState = this._config.password
+        ? {
+            account: this._config.saslAccount ?? this._config.nick,
+            password: this._config.password,
+            mechanism: null,
+            step: "awaiting_cap_ack",
+            loggedIn: false,
+          }
+        : null;
+
       const ws = new WebSocket(this._config.url);
       this._ws = ws;
 
@@ -99,10 +143,9 @@ export class AircClient {
       }, 10_000);
 
       ws.addEventListener("open", () => {
-        // Send registration sequence.
-        if (this._config.password) {
-          this._sendRaw(IrcMessage.pass(this._config.password).serialize());
-        }
+        // Send CAP negotiation before NICK/USER so the server holds
+        // registration until we send CAP END.
+        this._sendRaw("CAP LS 302");
         this._sendRaw(IrcMessage.nick(this._config.nick).serialize());
         this._sendRaw(IrcMessage.user(this._config.username, this._config.realname).serialize());
       });
@@ -387,6 +430,132 @@ export class AircClient {
       return;
     }
 
+    // -- CAP (capability negotiation) --
+    if (command.kind === "named" && command.name === "CAP") {
+      const subcommand = (msg.params[1] ?? "").toUpperCase();
+
+      if (subcommand === "LS") {
+        // params: [target, "LS", ["*",] caplist]
+        // Multi-line LS (302) uses "*" as the third param; wait for the final
+        // line (no "*"). We process each line as it arrives — requesting caps
+        // on the final line only (no "*" marker).
+        const isMultiLine = msg.params.length >= 4 && msg.params[2] === "*";
+        if (isMultiLine) return; // wait for the final LS line
+
+        const capList = msg.params[msg.params.length - 1] ?? "";
+        const advertised = new Set(
+          capList.split(/\s+/).filter((c) => c.length > 0).map((c) => c.split("=")[0].toLowerCase()),
+        );
+
+        // Build the intersection of optional caps the server advertises.
+        const optionalToRequest = OPTIONAL_CAPS.filter((c) => advertised.has(c));
+
+        const hasSasl = advertised.has("sasl");
+
+        if (this._config.password && hasSasl && this._saslState) {
+          // Request SASL first; optional caps in a second REQ.
+          this._saslState.mechanism = "PLAIN";
+          this._sendRaw("CAP REQ :sasl");
+          if (optionalToRequest.length > 0) {
+            this._sendRaw(`CAP REQ :${optionalToRequest.join(" ")}`);
+          }
+        } else if (optionalToRequest.length > 0) {
+          // No SASL — request optional caps and then end.
+          this._sendRaw(`CAP REQ :${optionalToRequest.join(" ")}`);
+        } else {
+          // Nothing to negotiate.
+          this._sendRaw("CAP END");
+        }
+        return;
+      }
+
+      if (subcommand === "ACK") {
+        const acked = (msg.params[msg.params.length - 1] ?? "").toLowerCase().split(/\s+/);
+        for (const cap of acked) {
+          if (cap.length > 0) this._negotiatedCaps.add(cap);
+        }
+
+        if (acked.includes("sasl") && this._saslState) {
+          this._saslState.step = "awaiting_challenge";
+          this._sendRaw("AUTHENTICATE PLAIN");
+        } else if (!this._negotiatedCaps.has("sasl") || this._saslState?.step === "done") {
+          // All non-SASL REQs acknowledged — end negotiation.
+          // (SASL flow will send CAP END via 903 handler.)
+          if (!this._saslState || this._saslState.step === "done") {
+            this._sendRaw("CAP END");
+          }
+        }
+        return;
+      }
+
+      if (subcommand === "NAK") {
+        // NAK on optional caps is silently ignored — the server just won't
+        // send those features. Only emit sasl_failed if SASL itself was NAK'd.
+        const nakked = (msg.params[msg.params.length - 1] ?? "").toLowerCase();
+        if (nakked.includes("sasl") && this._saslState) {
+          const reason = msg.params[msg.params.length - 1] ?? "capability rejected";
+          this._emit({ type: "sasl_failed", code: 0, reason });
+          this._sendRaw("CAP END");
+        }
+        // For optional caps NAK: if there's no in-flight SASL, we may need to
+        // end negotiation — but only if we have nothing else pending.
+        if (!this._saslState || this._saslState.step === "done") {
+          this._sendRaw("CAP END");
+        }
+        return;
+      }
+
+      return;
+    }
+
+    // -- AUTHENTICATE --
+    if (command.kind === "named" && command.name === "AUTHENTICATE") {
+      const payload = msg.params[0] ?? "";
+      if (payload === "+" && this._saslState && this._saslState.step === "awaiting_challenge") {
+        const { account, password } = this._saslState;
+        // SASL PLAIN: \0<authcid>\0<passwd>
+        const authStr = `\0${account}\0${password}`;
+        const bytes = new Uint8Array(authStr.length);
+        for (let i = 0; i < authStr.length; i++) {
+          bytes[i] = authStr.charCodeAt(i);
+        }
+        const encoded = btoa(String.fromCharCode(...Array.from(bytes)));
+        this._sendRaw(`AUTHENTICATE ${encoded}`);
+        this._saslState.step = "awaiting_success";
+      }
+      return;
+    }
+
+    // -- RPL_LOGGEDIN (900) --
+    if (command.kind === "numeric" && command.code === RPL_LOGGEDIN) {
+      const account = msg.params[2] ?? msg.params[1] ?? "";
+      if (this._saslState) {
+        this._saslState.loggedIn = true;
+      }
+      this._emit({ type: "sasl_logged_in", account });
+      return;
+    }
+
+    // -- RPL_SASLSUCCESS (903) --
+    if (command.kind === "numeric" && command.code === RPL_SASLSUCCESS) {
+      if (this._saslState) {
+        this._saslState.step = "done";
+      }
+      this._sendRaw("CAP END");
+      return;
+    }
+
+    // -- ERR_SASLFAIL (904) / ERR_SASLABORTED (906) --
+    if (
+      command.kind === "numeric" &&
+      (command.code === ERR_SASLFAIL || command.code === ERR_SASLABORTED)
+    ) {
+      const reason = msg.params[msg.params.length - 1] ?? "SASL authentication failed";
+      this._emit({ type: "sasl_failed", code: command.code, reason });
+      this._sendRaw("CAP END");
+      return;
+    }
+
     // -- Registration complete (001) --
     if (command.kind === "numeric" && command.code === RPL_WELCOME) {
       const nick = msg.params[0] ?? "";
@@ -398,6 +567,12 @@ export class AircClient {
       const event: IrcEvent = { type: "registered", nick, server, message };
       this._emit(event);
       hooks?.onRegistered?.();
+
+      // NickServ fallback: send IDENTIFY if password is set but SASL either
+      // wasn't used or didn't log us in.
+      if (this._config.password && (this._saslState === null || !this._saslState.loggedIn)) {
+        this._sendRaw(IrcMessage.privmsg("NickServ", `IDENTIFY ${this._config.password}`).serialize());
+      }
       return;
     }
 
@@ -423,10 +598,13 @@ export class AircClient {
       if (msg.params.length >= 4) {
         const channel = msg.params[2];
         const namesStr = msg.params[3];
+        // Strip all leading prefix chars (multi-prefix: @+nick, ~&nick, etc.)
         const members = namesStr
           .split(/\s+/)
           .filter((n) => n.length > 0)
-          .map((n) => n.replace(/^[@+%]/, ""));
+          .map((n) => n.replace(/^[@+%~&]+/, ""));
+        // Ensure channel entry exists — NAMES can arrive before our JOIN is processed.
+        this._state.joinChannel(channel);
         this._state.setMembers(channel, members);
       }
       return;
@@ -451,6 +629,8 @@ export class AircClient {
 
     // -- JOIN --
     if (command.kind === "named" && command.name === "JOIN") {
+      // params[0] = channel; extended-join adds params[1]=account and
+      // params[2]=realname — we read only the channel and ignore the rest.
       const channel = msg.params[0] ?? "";
       const nick = extractNick(msg.prefix);
       const ourNick = this._state.nick();
@@ -546,7 +726,9 @@ export class AircClient {
           kind = MessageKind.Action;
         }
 
-        const cm = newChannelMessage(target, from, text, kind);
+        // Use server-time tag when available (requires server-time / message-tags cap).
+        const serverTs = msg.tag("time") ?? undefined;
+        const cm = newChannelMessageWithTs(target, from, text, kind, serverTs);
 
         if (isChannelName(target)) {
           this._state.pushMessage(target, cm);
@@ -554,7 +736,7 @@ export class AircClient {
           this._state.pushPrivateMessage(cm);
         }
 
-        this._emit({ type: "message", message: newChannelMessage(target, from, text, kind) });
+        this._emit({ type: "message", message: cm });
       }
       return;
     }
@@ -567,7 +749,8 @@ export class AircClient {
 
       // Buffer notices from service bots as messages too.
       if (from) {
-        const cm = newChannelMessage(target, from, text, MessageKind.Normal);
+        const serverTs = msg.tag("time") ?? undefined;
+        const cm = newChannelMessageWithTs(target, from, text, MessageKind.Normal, serverTs);
         if (isChannelName(target)) {
           this._state.pushMessage(target, cm);
         } else {
@@ -576,6 +759,27 @@ export class AircClient {
       }
 
       this._emit({ type: "notice", from, target, text });
+      return;
+    }
+
+    // -- AWAY (away-notify) --
+    // Sent by the server to channel members when a peer sets or clears away.
+    // `params[0]` is the away message; absent means the user returned from away.
+    if (command.kind === "named" && command.name === "AWAY") {
+      const nick = extractNick(msg.prefix);
+      const message = msg.params[0]; // undefined = back from away
+      this._emit({ type: "away", nick, message });
+      return;
+    }
+
+    // -- ACCOUNT (account-notify) --
+    // Sent by the server when a user's NickServ account changes mid-session.
+    // `params[0] === "*"` means the user logged out.
+    if (command.kind === "named" && command.name === "ACCOUNT") {
+      const nick = extractNick(msg.prefix);
+      const raw = msg.params[0] ?? "*";
+      const account = raw === "*" ? undefined : raw;
+      this._emit({ type: "account_notify", nick, account });
       return;
     }
 
@@ -619,6 +823,18 @@ export class AircClient {
     return new Promise((resolve, reject) => {
       let settled = false;
 
+      // Initialise SASL state for this reconnect attempt.
+      this._negotiatedCaps = new Set();
+      this._saslState = this._config.password
+        ? {
+            account: this._config.saslAccount ?? this._config.nick,
+            password: this._config.password,
+            mechanism: null,
+            step: "awaiting_cap_ack",
+            loggedIn: false,
+          }
+        : null;
+
       const ws = new WebSocket(this._config.url);
       this._ws = ws;
 
@@ -632,9 +848,8 @@ export class AircClient {
       }, 10_000);
 
       ws.addEventListener("open", () => {
-        if (this._config.password) {
-          ws.send(IrcMessage.pass(this._config.password).serialize());
-        }
+        // Send CAP negotiation before NICK/USER.
+        ws.send("CAP LS 302");
         ws.send(IrcMessage.nick(this._config.nick).serialize());
         ws.send(IrcMessage.user(this._config.username, this._config.realname).serialize());
       });
