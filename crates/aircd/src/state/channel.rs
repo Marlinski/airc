@@ -32,9 +32,10 @@ impl SharedState {
             let shard = self.inner.users[i].read().await;
             for id in shard_ids {
                 if let Some(c) = shard.get(id)
-                    && c.is_local() {
-                        handles.push(c.clone());
-                    }
+                    && c.is_local()
+                {
+                    handles.push(c.clone());
+                }
             }
         }
         handles
@@ -123,9 +124,10 @@ impl SharedState {
         if is_empty {
             let mut map = self.inner.channels.write().await;
             if let Some(arc) = map.get(&key)
-                && arc.read().await.members.is_empty() {
-                    map.remove(&key);
-                }
+                && arc.read().await.members.is_empty()
+            {
+                map.remove(&key);
+            }
             return Some(vec![]);
         }
 
@@ -175,9 +177,10 @@ impl SharedState {
             let mut map = self.inner.channels.write().await;
             for key in &empty_keys {
                 if let Some(arc) = map.get(key)
-                    && arc.read().await.members.is_empty() {
-                        map.remove(key);
-                    }
+                    && arc.read().await.members.is_empty()
+                {
+                    map.remove(key);
+                }
             }
         }
 
@@ -572,9 +575,10 @@ impl SharedState {
         if is_empty {
             let mut map = self.inner.channels.write().await;
             if let Some(a) = map.get(&key)
-                && a.read().await.members.is_empty() {
-                    map.remove(&key);
-                }
+                && a.read().await.members.is_empty()
+            {
+                map.remove(&key);
+            }
             return Some(vec![]);
         }
 

@@ -198,15 +198,16 @@ pub async fn handle_whois(state: &SharedState, client_id: ClientId, msg: &IrcMes
             }
             // RPL_WHOISSPECIAL (320) — NickServ reputation if registered.
             if let Some(svc) = state.services()
-                && let Some(identity) = svc.nickserv.get_identity(&target.info.nick).await {
-                    client.send_numeric(
-                        RPL_WHOISSPECIAL,
-                        &[
-                            &target.info.nick,
-                            &format!("reputation {}", identity.reputation),
-                        ],
-                    );
-                }
+                && let Some(identity) = svc.nickserv.get_identity(&target.info.nick).await
+            {
+                client.send_numeric(
+                    RPL_WHOISSPECIAL,
+                    &[
+                        &target.info.nick,
+                        &format!("reputation {}", identity.reputation),
+                    ],
+                );
+            }
 
             // RPL_ENDOFWHOIS
             client.send_numeric(RPL_ENDOFWHOIS, &[&target.info.nick, "End of WHOIS list"]);

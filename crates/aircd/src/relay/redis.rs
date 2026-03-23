@@ -310,8 +310,7 @@ impl Relay for RedisRelay {
                 let proto_channels = channels
                     .into_iter()
                     .map(|ch| {
-                        let (topic_text, topic_setter, topic_ts) =
-                            ch.topic.unwrap_or_default();
+                        let (topic_text, topic_setter, topic_ts) = ch.topic.unwrap_or_default();
                         let mut mode_flags: u32 = 0;
                         if ch.modes.invite_only {
                             mode_flags |= 1 << 0;

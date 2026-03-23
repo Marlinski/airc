@@ -17,11 +17,6 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Install musl-tools
         run: |
           sudo apt-get update
@@ -72,11 +67,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
-      - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install dependencies (Linux)
         if: matrix.os == 'ubuntu-latest'

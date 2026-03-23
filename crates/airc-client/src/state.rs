@@ -155,9 +155,10 @@ impl ClientState {
     pub async fn add_member(&self, channel: &str, nick: &str) {
         let mut inner = self.inner.write().await;
         if let Some(ch) = inner.channels.get_mut(&channel.to_ascii_lowercase())
-            && !ch.members.iter().any(|n| n.eq_ignore_ascii_case(nick)) {
-                ch.members.push(nick.to_string());
-            }
+            && !ch.members.iter().any(|n| n.eq_ignore_ascii_case(nick))
+        {
+            ch.members.push(nick.to_string());
+        }
     }
 
     /// Remove a member from a channel.

@@ -104,10 +104,11 @@ pub async fn handle_join(state: &SharedState, client_id: ClientId, msg: &IrcMess
 
         // ChanServ access check (reputation-gated join).
         if let Some(svc) = state.services()
-            && let Err(reason) = svc.check_join(channel_name, &client.info.nick).await {
-                client.send_numeric(ERR_BANNEDFROMCHAN, &[channel_name, &reason]);
-                continue;
-            }
+            && let Err(reason) = svc.check_join(channel_name, &client.info.nick).await
+        {
+            client.send_numeric(ERR_BANNEDFROMCHAN, &[channel_name, &reason]);
+            continue;
+        }
 
         // CRDT ban list check via PersistentState.
         if let Some(ps) = state.persistent() {

@@ -14,7 +14,7 @@
 //! **Security:** PLAIN transmits the password in the clear (base64 is not
 //! encryption).  It must only be used over a TLS connection.
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 
 use super::{PasswordLookup, PasswordRecord, SaslError, SaslMechanism, SaslStep};
 use crate::services::nickserv::bcrypt_verify_password;
@@ -114,7 +114,7 @@ impl SaslMechanism for PlainMechanism {
 mod tests {
     use super::*;
     use crate::services::nickserv::{bcrypt_hash_password, derive_scram_credentials};
-    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+    use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 
     fn make_lookup(nick: &str, password: &str) -> PasswordLookup {
         let (scram_stored_key, scram_server_key, scram_salt, scram_iterations) =

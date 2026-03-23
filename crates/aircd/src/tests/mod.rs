@@ -152,19 +152,14 @@ impl TestClient {
     async fn recv_all(&mut self, dur: Duration) -> Vec<IrcMessage> {
         let mut msgs = Vec::new();
         let deadline = tokio::time::Instant::now() + dur;
-        loop {
-            match timeout(
-                deadline.saturating_duration_since(tokio::time::Instant::now()),
-                self.rx.recv(),
-            )
-            .await
-            {
-                Ok(Some(line)) => {
-                    if let Ok(msg) = IrcMessage::parse(line.trim_end()) {
-                        msgs.push(msg);
-                    }
-                }
-                _ => break,
+        while let Ok(Some(line)) = timeout(
+            deadline.saturating_duration_since(tokio::time::Instant::now()),
+            self.rx.recv(),
+        )
+        .await
+        {
+            if let Ok(msg) = IrcMessage::parse(line.trim_end()) {
+                msgs.push(msg);
             }
         }
         msgs
@@ -175,23 +170,18 @@ impl TestClient {
     async fn recv_until(&mut self, cmd: Command, dur: Duration) -> Vec<IrcMessage> {
         let mut msgs = Vec::new();
         let deadline = tokio::time::Instant::now() + dur;
-        loop {
-            match timeout(
-                deadline.saturating_duration_since(tokio::time::Instant::now()),
-                self.rx.recv(),
-            )
-            .await
-            {
-                Ok(Some(line)) => {
-                    if let Ok(msg) = IrcMessage::parse(line.trim_end()) {
-                        let matched = msg.command == cmd;
-                        msgs.push(msg);
-                        if matched {
-                            return msgs;
-                        }
-                    }
+        while let Ok(Some(line)) = timeout(
+            deadline.saturating_duration_since(tokio::time::Instant::now()),
+            self.rx.recv(),
+        )
+        .await
+        {
+            if let Ok(msg) = IrcMessage::parse(line.trim_end()) {
+                let matched = msg.command == cmd;
+                msgs.push(msg);
+                if matched {
+                    return msgs;
                 }
-                _ => break,
             }
         }
         msgs

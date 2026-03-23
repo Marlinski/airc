@@ -1,6 +1,16 @@
 use std::io::Result;
 
 fn main() -> Result<()> {
+    // Use vendored protoc so cross-compilation (e.g. aarch64-unknown-linux-musl
+    // via `cross`) works without needing protoc installed on the host or inside
+    // the cross container.  protoc is a build-host tool so the x86_64 binary
+    // bundled by protoc-bin-vendored is always the right one regardless of the
+    // compilation target.
+    // SAFETY: build scripts are single-threaded; no concurrent env reads.
+    unsafe {
+        std::env::set_var("PROTOC", protoc_bin_vendored::protoc_bin_path().unwrap());
+    }
+
     let proto_dir = "../../proto";
 
     let protos = &[

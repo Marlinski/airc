@@ -75,9 +75,10 @@ impl SharedState {
             let mut map = self.inner.channels.write().await;
             for key in &empty_keys {
                 if let Some(arc) = map.get(key)
-                    && arc.read().await.members.is_empty() {
-                        map.remove(key);
-                    }
+                    && arc.read().await.members.is_empty()
+                {
+                    map.remove(key);
+                }
             }
         }
 
@@ -128,9 +129,10 @@ impl SharedState {
 
         // Check uniqueness via index (O(1)).
         if let Some(&existing_id) = nick_index.get(&new_lower)
-            && existing_id != id {
-                return Err(NickError::InUse);
-            }
+            && existing_id != id
+        {
+            return Err(NickError::InUse);
+        }
 
         // Now acquire the shard for this client.
         let mut shard = self.user_shard(id).write().await;
@@ -268,9 +270,10 @@ impl SharedState {
             let mut map = self.inner.channels.write().await;
             for key in &empty_keys {
                 if let Some(arc) = map.get(key)
-                    && arc.read().await.members.is_empty() {
-                        map.remove(key);
-                    }
+                    && arc.read().await.members.is_empty()
+                {
+                    map.remove(key);
+                }
             }
         }
     }
@@ -356,9 +359,10 @@ impl SharedState {
             let mut map = self.inner.channels.write().await;
             for key in &empty_keys {
                 if let Some(arc) = map.get(key)
-                    && arc.read().await.members.is_empty() {
-                        map.remove(key);
-                    }
+                    && arc.read().await.members.is_empty()
+                {
+                    map.remove(key);
+                }
             }
         }
 
@@ -416,9 +420,10 @@ impl SharedState {
             let shard = self.inner.users[i].read().await;
             for id in ids {
                 if let Some(c) = shard.get(id)
-                    && c.is_local() {
-                        handles.push(c.clone());
-                    }
+                    && c.is_local()
+                {
+                    handles.push(c.clone());
+                }
             }
         }
         handles
@@ -579,9 +584,10 @@ impl SharedState {
             let shard = self.inner.users[i].read().await;
             for pid in ids {
                 if let Some(c) = shard.get(pid)
-                    && c.is_local() {
-                        handles.push(c.clone());
-                    }
+                    && c.is_local()
+                {
+                    handles.push(c.clone());
+                }
             }
         }
         handles

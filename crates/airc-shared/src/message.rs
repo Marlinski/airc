@@ -140,7 +140,10 @@ impl Command {
     /// [`Command::Unknown`].
     pub fn from_str_upper(s: &str) -> Self {
         // Try numeric first — must be exactly three ASCII digits.
-        if s.len() == 3 && s.bytes().all(|b| b.is_ascii_digit()) && let Ok(n) = s.parse::<u16>() {
+        if s.len() == 3
+            && s.bytes().all(|b| b.is_ascii_digit())
+            && let Ok(n) = s.parse::<u16>()
+        {
             return Command::Numeric(n);
         }
 

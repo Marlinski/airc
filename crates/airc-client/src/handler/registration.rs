@@ -27,12 +27,13 @@ pub async fn handle_welcome(msg: &IrcMessage, ctx: &ConnContext) {
     // complete (e.g., server didn't advertise SASL, or SASL failed), send
     // a NickServ IDENTIFY as a best-effort fallback.
     if let Some(ref pw) = ctx.password
-        && !ctx.state.is_sasl_logged_in().await {
-            let _ = ctx
-                .line_tx
-                .send(IrcMessage::privmsg("NickServ", &format!("IDENTIFY {pw}")).serialize())
-                .await;
-        }
+        && !ctx.state.is_sasl_logged_in().await
+    {
+        let _ = ctx
+            .line_tx
+            .send(IrcMessage::privmsg("NickServ", &format!("IDENTIFY {pw}")).serialize())
+            .await;
+    }
 
     let _ = ctx
         .event_tx
@@ -73,10 +74,7 @@ pub async fn handle_names_reply(msg: &IrcMessage, ctx: &ConnContext) {
         // both the single-prefix and multi-prefix cases correctly.
         let members: Vec<String> = names_str
             .split_whitespace()
-            .map(|n| {
-                n.trim_start_matches(['@', '+', '%', '~', '&'])
-                    .to_string()
-            })
+            .map(|n| n.trim_start_matches(['@', '+', '%', '~', '&']).to_string())
             .collect();
         ctx.state.set_members(channel, members).await;
     }

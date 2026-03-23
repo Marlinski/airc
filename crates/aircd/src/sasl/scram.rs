@@ -26,7 +26,7 @@
 //! * Channel binding (`p=tls-unique`) is not implemented; we reject any `p=`
 //!   channel-binding flag and only accept `n,,` (no binding) or `y,,`.
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use hmac::{Hmac, Mac};
 use rand::RngCore;
 use sha2::{Digest, Sha256};

@@ -210,7 +210,9 @@ export class AircClient {
         if (!settled) {
           settled = true;
           clearTimeout(timeout);
-          reject(new Error("connection closed before registration"));
+          if (!this._destroyed) {
+            reject(new Error("connection closed before registration"));
+          }
         } else {
           // Connection lost after successful connect — emit event and
           // start auto-reconnect.

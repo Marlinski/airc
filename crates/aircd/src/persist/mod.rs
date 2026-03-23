@@ -386,9 +386,10 @@ impl PersistentState {
     pub async fn open(db_path: &Path, node_id: impl Into<NodeId>) -> Result<Self, sqlx::Error> {
         // Ensure parent directory exists.
         if let Some(parent) = db_path.parent()
-            && !parent.as_os_str().is_empty() {
-                tokio::fs::create_dir_all(parent).await.ok();
-            }
+            && !parent.as_os_str().is_empty()
+        {
+            tokio::fs::create_dir_all(parent).await.ok();
+        }
 
         let url = format!(
             "sqlite://{}?mode=rwc",
@@ -641,9 +642,10 @@ impl PersistentState {
     /// anti-entropy on reconnect.  Drops are logged at WARN level.
     async fn gossip(&self, crdt_id: &str, blob: Vec<u8>) {
         if let Some(tx) = self.inner.gossip_tx.get()
-            && let Err(e) = tx.try_send((crdt_id.to_string(), blob)) {
-                warn!(crdt_id = %crdt_id, error = %e, "gossip: channel full, dropping CRDT delta (anti-entropy will recover)");
-            }
+            && let Err(e) = tx.try_send((crdt_id.to_string(), blob))
+        {
+            warn!(crdt_id = %crdt_id, error = %e, "gossip: channel full, dropping CRDT delta (anti-entropy will recover)");
+        }
     }
 
     /// Internal helper: enqueue a write operation for the background write task.

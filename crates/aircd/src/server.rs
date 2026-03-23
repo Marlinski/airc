@@ -763,10 +763,9 @@ impl Server {
                         Some(peer_hash) => peer_hash != our_hash,
                         None => true, // peer is missing this CRDT entirely
                     };
-                    if needs_send
-                        && let Some(blob) = ps.export_crdt(crdt_id).await {
-                            diverged.insert(crdt_id.clone(), blob);
-                        }
+                    if needs_send && let Some(blob) = ps.export_crdt(crdt_id).await {
+                        diverged.insert(crdt_id.clone(), blob);
+                    }
                 }
 
                 if !diverged.is_empty() {

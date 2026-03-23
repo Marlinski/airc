@@ -244,14 +244,15 @@ pub async fn handle_cap(msg: &IrcMessage, ctx: &ConnContext) {
             if has_sasl {
                 let mut guard = ctx.sasl_state.lock().await;
                 if let Some(ref mut hs) = *guard
-                    && hs.step == SaslStep::AwaitingCapAck {
-                        hs.step = SaslStep::AwaitingChallenge;
-                        let mech = hs.mechanism.wire_name().to_string();
-                        drop(guard);
-                        info!(mechanism = %mech, "starting SASL authentication");
-                        let _ = ctx.line_tx.send(format!("AUTHENTICATE {mech}")).await;
-                        return;
-                    }
+                    && hs.step == SaslStep::AwaitingCapAck
+                {
+                    hs.step = SaslStep::AwaitingChallenge;
+                    let mech = hs.mechanism.wire_name().to_string();
+                    drop(guard);
+                    info!(mechanism = %mech, "starting SASL authentication");
+                    let _ = ctx.line_tx.send(format!("AUTHENTICATE {mech}")).await;
+                    return;
+                }
             }
 
             // No sasl in this ACK — either it's the optional-caps ACK, or an
