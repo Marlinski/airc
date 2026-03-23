@@ -166,11 +166,17 @@ jobs:
         working-directory: packages/airc-client-ts
 
       - name: Bump version to match release tag
-        run: npm version ${{ steps.tag.outputs.version }} --no-git-tag-version --allow-same-version
+        run: npm version ${{ steps.tag.outputs.version }} --no-git-tag-version
         working-directory: packages/airc-client-ts
 
       - name: Publish
-        run: npm publish
+        run: |
+          npm publish 2>&1 | tee /tmp/npm-publish.log; RC=${PIPESTATUS[0]}
+          if [ $RC -ne 0 ] && grep -q "You cannot publish over the previously published versions" /tmp/npm-publish.log; then
+            echo "Version already published on npm, skipping."
+            exit 0
+          fi
+          exit $RC
         working-directory: packages/airc-client-ts
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
