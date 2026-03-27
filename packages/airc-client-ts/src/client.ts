@@ -337,6 +337,11 @@ export class AircClient {
     return this._connected;
   }
 
+  /** The set of IRCv3 capabilities successfully negotiated with the server. */
+  negotiatedCaps(): Set<string> {
+    return new Set(this._negotiatedCaps);
+  }
+
   /** Access the underlying state for advanced queries. */
   state(): ClientState {
     return this._state;
@@ -449,8 +454,12 @@ export class AircClient {
           capList.split(/\s+/).filter((c) => c.length > 0).map((c) => c.split("=")[0].toLowerCase()),
         );
 
-        // Build the intersection of optional caps the server advertises.
-        const optionalToRequest = OPTIONAL_CAPS.filter((c) => advertised.has(c));
+        // Build the intersection of optional caps the server advertises,
+        // minus any caps the caller has opted out of via disableCaps.
+        const disabled = new Set(this._config.disableCaps.map((c) => c.toLowerCase()));
+        const optionalToRequest = OPTIONAL_CAPS.filter(
+          (c) => advertised.has(c) && !disabled.has(c),
+        );
 
         const hasSasl = advertised.has("sasl");
 
@@ -590,7 +599,10 @@ export class AircClient {
     // -- Topic (332) --
     if (command.kind === "numeric" && command.code === RPL_TOPIC) {
       if (msg.params.length >= 3) {
-        this._state.setTopic(msg.params[1], msg.params[2]);
+        const channel = msg.params[1];
+        const topic = msg.params[2];
+        this._state.setTopic(channel, topic);
+        this._emit({ type: "topic", channel, topic });
       }
       return;
     }
@@ -608,6 +620,8 @@ export class AircClient {
         // Ensure channel entry exists — NAMES can arrive before our JOIN is processed.
         this._state.joinChannel(channel);
         this._state.setMembers(channel, members);
+        // Emit structured event so consumers don't need to parse raw lines.
+        this._emit({ type: "names", channel, members });
       }
       return;
     }

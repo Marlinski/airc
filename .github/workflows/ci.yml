@@ -45,6 +45,26 @@ jobs:
       - name: Test
         run: cargo test --all
 
+  wairc:
+    name: Build wairc
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: packages/wairc
+
+      - name: Build
+        run: npm run build
+        working-directory: packages/wairc
+
   build-matrix:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}

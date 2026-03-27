@@ -45,10 +45,22 @@ export interface ClientConfig {
 
   /** Maximum number of messages to buffer per channel. Default: 1000. */
   bufferSize?: number;
+
+  /**
+   * IRCv3 capabilities to disable, even if the server advertises them.
+   *
+   * By default the client requests all supported optional caps
+   * (`echo-message`, `server-time`, `message-tags`, etc.).
+   * Use this to opt out of specific ones.
+   *
+   * Example: `{ disableCaps: ["echo-message"] }` — useful for simple clients
+   * that do optimistic local display and don't want the server echo.
+   */
+  disableCaps?: string[];
 }
 
 /** Resolve optional config fields to their defaults. */
-export function resolveConfig(config: ClientConfig): Required<Omit<ClientConfig, "password" | "saslAccount">> & { password?: string; saslAccount?: string } {
+export function resolveConfig(config: ClientConfig): Required<Omit<ClientConfig, "password" | "saslAccount" | "disableCaps">> & { password?: string; saslAccount?: string; disableCaps: string[] } {
   return {
     url: config.url ?? DEFAULT_URL,
     nick: config.nick,
@@ -58,5 +70,6 @@ export function resolveConfig(config: ClientConfig): Required<Omit<ClientConfig,
     saslAccount: config.saslAccount,
     autoJoin: config.autoJoin ?? [],
     bufferSize: config.bufferSize ?? 1000,
+    disableCaps: config.disableCaps ?? [],
   };
 }

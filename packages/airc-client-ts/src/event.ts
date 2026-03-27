@@ -69,6 +69,17 @@ export type IrcEvent =
    * `account` is `undefined` when the user logged out (`ACCOUNT *`).
    */
   | { type: "account_notify"; nick: string; account: string | undefined }
+  /**
+   * Initial member list for a channel, from 353 RPL_NAMREPLY.
+   * `members` includes mode prefixes (@, +, %, &, ~) if present.
+   * Emitted once per 353 line; multiple lines may arrive for large channels.
+   */
+  | { type: "names"; channel: string; members: string[] }
+  /**
+   * Topic set at join time, from 332 RPL_TOPIC.
+   * Distinct from `topic_change` which is the live TOPIC command mid-session.
+   */
+  | { type: "topic"; channel: string; topic: string }
   | { type: "raw"; line: string };
 
 // ---------------------------------------------------------------------------

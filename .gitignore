@@ -27,5 +27,5 @@ nickserv.json
 chanserv.json
 data/
 
-# Deployment scripts and configuration (private)
+# Deployment lives in ../sysiphe/airc/ (keep deploy/ ignored in case of accidental creation)
 deploy/
